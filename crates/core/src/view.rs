@@ -85,6 +85,7 @@ pub struct ListColumn {
 
 /// フォルダごとに覚える表示の設定。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FolderView {
     pub mode: ViewMode,
     pub order: SortOrder,
@@ -109,6 +110,31 @@ impl Default for FolderView {
 }
 
 impl FolderView {
+    /// 開くフォルダの設定。保存が無ければ、今の表示形式を引き継いだ既定の設定にする。
+    pub fn for_folder(saved: Option<FolderView>, current_mode: ViewMode) -> Self {
+        match saved {
+            Some(mut view) => {
+                view.repair();
+                view
+            }
+            None => Self { mode: current_mode, ..Self::default() },
+        }
+    }
+
+    /// 壊れた保存値で画面が使えなくならないよう、必須の項目と幅を直す。
+    fn repair(&mut self) {
+        if !self.has_field(Field::Name) {
+            let field = Field::Name;
+            self.columns.insert(0, ListColumn { field, width: field.default_width() });
+        }
+        for column in &mut self.columns {
+            column.width = column.width.clamp(MIN_FIELD_WIDTH, MAX_FIELD_WIDTH);
+        }
+        if !(MIN_FIELD_WIDTH..=MAX_FIELD_WIDTH).contains(&self.column_width) {
+            self.column_width = DEFAULT_COLUMN_WIDTH;
+        }
+    }
+
     /// 項目の表示を切り替える。名前は消さない。
     pub fn toggle_field(&mut self, field: Field) {
         if field == Field::Name {
@@ -136,7 +162,8 @@ impl FolderView {
     }
 
     pub fn needs_properties(&self) -> bool {
-        self.group.needs_properties() || self.columns.iter().any(|column| column.field.needs_properties())
+        self.group.needs_properties()
+            || (self.mode == ViewMode::List && self.columns.iter().any(|column| column.field.needs_properties()))
     }
 
     pub fn has_field(&self, field: Field) -> bool {
@@ -218,6 +245,37 @@ mod tests {
     fn fit_width_uses_longest_text_with_padding() {
         assert_eq!(fit_width(["ab", "素材"].into_iter(), 10.0, 30.0), 50.0);
         assert_eq!(fit_width(std::iter::empty(), 10.0, 5.0), MIN_FIELD_WIDTH);
+    }
+
+    #[test]
+    fn list_fields_need_properties_only_in_list() {
+        let mut view = FolderView::default();
+        view.toggle_field(Field::Author);
+        view.mode = ViewMode::Icons;
+        assert!(!view.needs_properties());
+    }
+
+    #[test]
+    fn unsaved_folder_inherits_current_mode() {
+        let view = FolderView::for_folder(None, ViewMode::Columns);
+        assert_eq!(view.mode, ViewMode::Columns);
+        let saved = FolderView { mode: ViewMode::Icons, ..FolderView::default() };
+        assert_eq!(FolderView::for_folder(Some(saved), ViewMode::Columns).mode, ViewMode::Icons);
+    }
+
+    #[test]
+    fn broken_saved_view_is_repaired() {
+        let broken = FolderView { columns: Vec::new(), column_width: 1.0, ..FolderView::default() };
+        let view = FolderView::for_folder(Some(broken), ViewMode::List);
+        assert!(view.has_field(Field::Name));
+        assert_eq!(view.column_width, DEFAULT_COLUMN_WIDTH);
+    }
+
+    #[test]
+    fn old_saved_view_without_new_fields_still_loads() {
+        let view: FolderView = serde_json::from_str(r#"{"mode":"Icons"}"#).unwrap();
+        assert_eq!(view.mode, ViewMode::Icons);
+        assert_eq!(view.group, GroupKey::None);
     }
 
     #[test]

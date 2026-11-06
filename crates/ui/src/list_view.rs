@@ -68,8 +68,7 @@ impl Browser {
 
     fn toggle_expanded(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.expanded.remove(&path).is_none() {
-            let (order, wants) = (self.view.order, false);
-            let pane = self.new_pane(path.clone(), order, wants, cx);
+            let pane = self.new_pane(path.clone(), self.view.order, false, cx);
             self.expanded.insert(path, pane);
         } else {
             // 閉じたフォルダの中で開いていた分も閉じる
@@ -99,6 +98,7 @@ impl Browser {
             Field::Modified => format_time(entry.modified),
             Field::Created => format_time(entry.created),
             Field::Size if !entry.is_dir => format_size(entry.size),
+            Field::Size if entry.is_link => "--".to_string(),
             Field::Size => {
                 let path = folder.join(entry.os_name());
                 self.sizes.update(cx, |sizes, _| sizes.get(&path)).map_or("--".to_string(), format_size)
@@ -122,8 +122,18 @@ impl Browser {
         } else {
             let folder = self.pane.read(cx).state.path.clone();
             let entries = self.pane.read(cx).state.entries.clone();
-            let texts: Vec<String> =
-                entries.iter().map(|entry| self.field_text(column.field, &folder, entry, cx)).collect();
+            let known_size = |entry: &Entry, this: &Self, cx: &Context<Self>| {
+                let size = this.sizes.read(cx).peek(&folder.join(entry.os_name()));
+                size.map_or("--".to_string(), format_size)
+            };
+            // 幅を測るためだけに、全フォルダのサイズ計算を始めないようにする
+            let texts: Vec<String> = entries
+                .iter()
+                .map(|entry| match column.field {
+                    Field::Size if entry.is_dir => known_size(entry, self, cx),
+                    field => self.field_text(field, &folder, entry, cx),
+                })
+                .collect();
             fit_width(texts.iter().map(String::as_str).chain([column.field.label()]), theme::TEXT_SIZE, theme::FIELD_FIT_PADDING)
         };
         self.update_view(cx, |view| view.resize_column(index, width));
@@ -223,7 +233,9 @@ impl Browser {
             .child(handle)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.menu = None;
                     this.header_drag = Some(HeaderDrag { index, start_x: event.position.x.into(), target: None });
                 }),
             )

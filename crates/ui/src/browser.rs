@@ -108,7 +108,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
-        let mut view = saved_view(&store, &path);
+        let mut view = FolderView::for_folder(saved_view(&store, &path), ViewMode::List);
         if let Some(mode) = mode {
             view.mode = mode;
         }
@@ -168,7 +168,7 @@ impl Browser {
 
     /// 開くフォルダ用に、そのフォルダの保存済みの設定を読む。
     pub fn view_of(&self, path: &Path) -> FolderView {
-        saved_view(&self.store, path)
+        FolderView::for_folder(saved_view(&self.store, path), self.view.mode)
     }
 
     fn reset_columns(&mut self) {
@@ -309,8 +309,11 @@ impl Browser {
     }
 
     fn drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // ウィンドウの外でボタンを離した時も、変えた幅は残す
         if event.pressed_button != Some(MouseButton::Left) {
-            self.resizing = None;
+            if self.resizing.take().is_some() {
+                self.save_active_view(cx);
+            }
             self.header_drag = None;
             return;
         }
@@ -605,8 +608,8 @@ impl Browser {
     }
 }
 
-fn saved_view(store: &Option<Store>, path: &Path) -> FolderView {
-    store.as_ref().and_then(|store| store.folder_view(path)).unwrap_or_default()
+fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
+    store.as_ref().and_then(|store| store.folder_view(path))
 }
 
 impl Render for Browser {
@@ -641,6 +644,7 @@ impl Render for Browser {
             .font_family(theme::FONT)
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

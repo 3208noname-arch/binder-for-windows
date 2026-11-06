@@ -11,6 +11,10 @@ pub struct Store {
 impl Store {
     pub fn open(file: &Path) -> rusqlite::Result<Self> {
         let connection = rusqlite::Connection::open(file)?;
+        // 画面の操作ごとに書くので、待ちを短くする
+        connection.busy_timeout(std::time::Duration::from_millis(200))?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.execute(
             "CREATE TABLE IF NOT EXISTS folder_view (path TEXT PRIMARY KEY, view TEXT NOT NULL)",
             [],

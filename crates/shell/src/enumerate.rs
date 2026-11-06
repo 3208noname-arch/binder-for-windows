@@ -99,13 +99,23 @@ fn enumerate(
     result
 }
 
-/// フォルダの中身の合計サイズ。止められた時は `None`。読めないサブフォルダは0として数える。
-pub fn folder_size(path: &Path, cancelled: &AtomicBool) -> Option<u64> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderSize {
+    Bytes(u64),
+    Cancelled,
+    Unreadable,
+}
+
+/// フォルダの中身の合計サイズ。読めないサブフォルダは0として数える。
+pub fn folder_size(path: &Path, cancelled: &AtomicBool) -> FolderSize {
+    if cancelled.load(Ordering::Relaxed) {
+        return FolderSize::Cancelled;
+    }
     let mut total = 0;
     let mut folders = vec![path.to_path_buf()];
     while let Some(folder) = folders.pop() {
         if cancelled.load(Ordering::Relaxed) {
-            return None;
+            return FolderSize::Cancelled;
         }
         let mut add = |event| {
             if let ListEvent::Batch(batch) = event {
@@ -119,9 +129,12 @@ pub fn folder_size(path: &Path, cancelled: &AtomicBool) -> Option<u64> {
                 }
             }
         };
-        let _ = enumerate(&folder, cancelled, &mut add);
+        if enumerate(&folder, cancelled, &mut add).is_err() && folder == path {
+            return FolderSize::Unreadable;
+        }
     }
-    Some(total)
+    // 最後のフォルダの途中で止められると、合計が足りないまま抜けてくる
+    if cancelled.load(Ordering::Relaxed) { FolderSize::Cancelled } else { FolderSize::Bytes(total) }
 }
 
 fn to_entry(data: &WIN32_FIND_DATAW) -> Option<Entry> {

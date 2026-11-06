@@ -1,4 +1,4 @@
-use filer_shell::{ListEvent, compare_names, long_path, should_flush, start_list};
+use filer_shell::{FolderSize, ListEvent, compare_names, long_path, should_flush, start_list};
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -195,14 +195,21 @@ fn folder_size_sums_nested_files() {
     std::fs::create_dir(dir.path().join("sub")).unwrap();
     std::fs::write(dir.path().join("sub").join("b"), vec![0u8; 50]).unwrap();
     let flag = std::sync::atomic::AtomicBool::new(false);
-    assert_eq!(filer_shell::folder_size(dir.path(), &flag), Some(150));
+    assert_eq!(filer_shell::folder_size(dir.path(), &flag), FolderSize::Bytes(150));
 }
 
 #[test]
-fn cancelled_folder_size_returns_none() {
+fn cancelled_folder_size_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let flag = std::sync::atomic::AtomicBool::new(true);
-    assert_eq!(filer_shell::folder_size(dir.path(), &flag), None);
+    assert_eq!(filer_shell::folder_size(dir.path(), &flag), FolderSize::Cancelled);
+}
+
+#[test]
+fn unreadable_folder_has_no_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(filer_shell::folder_size(&dir.path().join("none"), &flag), FolderSize::Unreadable);
 }
 
 #[test]

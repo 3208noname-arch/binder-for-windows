@@ -163,7 +163,9 @@ impl Browser {
         let rows = Rc::new(grid_rows_of(&tree, per_row));
         let version = pane.version;
         let old = self.grid_list.item_count();
+        let top = self.grid_list.logical_scroll_top();
         self.grid_list.splice(0..old, rows.len());
+        self.grid_list.scroll_to(top);
         self.grid_data = Some(GridData { version, group, per_row, today, rows });
     }
 
