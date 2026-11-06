@@ -1,3 +1,4 @@
+mod actions;
 mod browser;
 mod columns_view;
 mod folder_pane;
@@ -7,6 +8,7 @@ mod list_state;
 mod list_tree;
 mod list_view;
 mod size_cache;
+mod text_input;
 mod theme;
 
 use browser::Browser;
@@ -68,6 +70,7 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..Default::default()
         };
+        text_input::bind_keys(cx);
         let (mode, store) = (start_mode(), open_store());
         cx.open_window(options, move |window, cx| cx.new(|cx| Browser::new(path, mode, store, measure, window, cx))).unwrap();
         cx.on_window_closed(|cx| cx.quit()).detach();

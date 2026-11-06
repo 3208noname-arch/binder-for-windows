@@ -10,12 +10,14 @@ pub struct ListState {
     pub error: Option<String>,
     pub loading: bool,
     pub generation: u64,
+    /// 再読み込みの途中で届いた分。終わるまで今の一覧を見せ続ける
+    incoming: Option<Vec<Entry>>,
 }
 
 impl ListState {
     pub fn new(path: PathBuf) -> Self {
         let order = SortOrder { key: SortKey::Name, descending: false };
-        Self { path, entries: Vec::new(), order, error: None, loading: false, generation: 0 }
+        Self { path, entries: Vec::new(), order, error: None, loading: false, generation: 0, incoming: None }
     }
 
     /// 別のフォルダへ移る。返した世代より古い列挙の結果は `apply` で捨てる。
@@ -24,6 +26,15 @@ impl ListState {
         self.entries.clear();
         self.error = None;
         self.loading = true;
+        self.incoming = None;
+        self.generation += 1;
+        self.generation
+    }
+
+    /// 同じフォルダを読み直す。終わるまで今の一覧を見せ続ける。
+    pub fn reload(&mut self) -> u64 {
+        self.loading = true;
+        self.incoming = Some(Vec::new());
         self.generation += 1;
         self.generation
     }
@@ -32,10 +43,18 @@ impl ListState {
         if generation != self.generation {
             return;
         }
-        match event {
-            ListEvent::Batch(batch) => insert_sorted(&mut self.entries, batch, self.order, compare_names),
-            ListEvent::Done => self.loading = false,
-            ListEvent::Failed(message) => {
+        match (event, &mut self.incoming) {
+            (ListEvent::Batch(batch), Some(incoming)) => incoming.extend(batch),
+            (ListEvent::Batch(batch), None) => insert_sorted(&mut self.entries, batch, self.order, compare_names),
+            (ListEvent::Done, _) => {
+                if let Some(mut incoming) = self.incoming.take() {
+                    sort_entries(&mut incoming, self.order, compare_names);
+                    self.entries = incoming;
+                }
+                self.loading = false;
+            }
+            (ListEvent::Failed(message), _) => {
+                self.incoming = None;
                 self.loading = false;
                 self.error = Some(message);
             }
@@ -82,6 +101,21 @@ pub fn coalesce(events: Vec<ListEvent>) -> Vec<ListEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_keeps_rows_until_listing_ends() {
+        let mut s = ListState::new("a".into());
+        let g = s.open("a".into());
+        s.apply(g, ListEvent::Batch(vec![file("old")]));
+        s.apply(g, ListEvent::Done);
+        let g = s.reload();
+        assert!(s.loading);
+        s.apply(g, ListEvent::Batch(vec![file("new2"), file("new1")]));
+        assert_eq!(names(&s), ["old"]);
+        s.apply(g, ListEvent::Done);
+        assert_eq!(names(&s), ["new1", "new2"]);
+        assert!(!s.loading);
+    }
 
     #[test]
     fn note_tells_why_a_folder_shows_nothing() {

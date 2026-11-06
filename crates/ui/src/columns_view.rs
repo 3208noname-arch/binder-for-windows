@@ -59,6 +59,7 @@ impl Browser {
     fn clear_column(&mut self, column: usize, cx: &mut Context<Self>) {
         if let Some(current) = self.columns.get_mut(column) {
             current.selected = None;
+            self.selection.clear();
             self.columns.truncate(column + 1);
             self.active_column = column;
             self.preview = None;
@@ -66,17 +67,28 @@ impl Browser {
         }
     }
 
+    /// 列のクリック。Ctrl、Shiftは選択だけを変え、普通のクリックは列を開く。
+    #[allow(clippy::too_many_arguments)]
+    fn click_column_item(&mut self, column: usize, path: PathBuf, name: OsString, entry: Entry, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_column = column;
+        let modifiers = event.modifiers();
+        if event.click_count() == 2 || modifiers.control || modifiers.shift {
+            let is_dir = entry.is_dir;
+            self.click_item(path, is_dir, event, window, cx);
+        } else {
+            self.select_in_column(column, name, entry, cx);
+            window.focus(&self.focus);
+        }
+    }
+
     /// 列の項目を選ぶ。右の列を閉じ、フォルダなら新しい列を開く。
-    fn select_in_column(&mut self, column: usize, name: OsString, entry: Entry, event: &ClickEvent, cx: &mut Context<Self>) {
+    pub fn select_in_column(&mut self, column: usize, name: OsString, entry: Entry, cx: &mut Context<Self>) {
         let Some(current) = self.columns.get_mut(column) else { return };
         current.selected = Some(name.clone());
         self.active_column = column;
         let folder = current.pane.read(cx).state.path.clone();
         let path = folder.join(&name);
-        if event.click_count() == 2 && entry.is_dir {
-            self.navigate(path, cx);
-            return;
-        }
+        self.selection.select_only(path.clone());
         self.columns.truncate(column + 1);
         if entry.is_dir {
             self.preview = None;
@@ -92,7 +104,7 @@ impl Browser {
         cx.notify();
     }
 
-    fn column_tree(&mut self, column: usize, cx: &Context<Self>) -> Rc<Flattened> {
+    pub fn column_tree(&mut self, column: usize, cx: &Context<Self>) -> Rc<Flattened> {
         let current = &self.columns[column];
         let group = current.view.group;
         let pane = current.pane.read(cx);
@@ -122,7 +134,8 @@ impl Browser {
                     Row::Item(row) => *row,
                 };
                 let entry = pane.read(cx).state.entries.get(row.entry as usize)?.clone();
-                let active = selected.as_deref() == Some(entry.os_name());
+                let path = folder.join(entry.os_name());
+                let active = selected.as_deref() == Some(entry.os_name()) || self.selection.contains(&path);
                 let background = match (active, ix % 2 == 1) {
                     (true, _) => selected_background,
                     (false, true) => theme::STRIPE,
@@ -131,11 +144,10 @@ impl Browser {
                 let icon = self.icons.update(cx, |icons, _| icons.get(&folder, &entry, SMALL));
                 let name = entry.os_name().to_os_string();
                 let is_dir = entry.is_dir;
-                let label = entry.name.clone();
                 let icon = self.icon(icon, is_dir, theme::ROW_ICON);
-                Some(
-                    div()
-                        .id(ix)
+                let name_element = self.name_or_input(&path, &entry);
+                let row = div()
+                    .id(ix)
                         .flex()
                         .items_center()
                         .gap_1()
@@ -145,13 +157,15 @@ impl Browser {
                         .bg(rgb(background))
                         .text_color(rgb(if active { selected_text } else { theme::TEXT }))
                         .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, event, _, cx| {
-                            this.select_in_column(column, name.clone(), entry.clone(), event, cx)
-                        }))
                         .child(icon)
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
-                        .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")))
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(name_element))
+                    .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")));
+                let click_path = path.clone();
+                Some(
+                    self.item_mouse(row, path, is_dir, cx)
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.click_column_item(column, click_path.clone(), name.clone(), entry.clone(), event, window, cx)
+                        }))
                         .into_any_element(),
                 )
             })
@@ -206,7 +220,14 @@ impl Browser {
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::LINE))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.clear_column(column, cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                this.commit_rename(window, cx);
+                this.clear_column(column, cx);
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+                this.active_column = column;
+                this.folder_menu(cx);
+            }))
             .child(body)
             .child(handle)
     }

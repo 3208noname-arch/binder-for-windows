@@ -6,7 +6,7 @@ use crate::theme;
 use filer_core::{Entry, Field, fit_width, format_size, kind_of};
 use filer_shell::{format_time, today};
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Window, div,
+    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ pub fn group_header(id: impl Into<gpui::ElementId>, label: &str, count: usize) -
 
 impl Browser {
     /// 今の行の並び。開いているフォルダの子を親の下へ展開する。中身が変わるまでは作り直さない。
-    fn tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
+    pub fn tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
         let root = self.pane.read(cx);
         let today = today();
         let key = TreeKey {
@@ -74,16 +74,6 @@ impl Browser {
             // 閉じたフォルダの中で開いていた分も閉じる
             self.expanded.retain(|key, _| !key.starts_with(&path));
         }
-        cx.notify();
-    }
-
-    /// 行の位置は列挙の途中で動くので、番号ではなくパスで受ける。
-    fn click_list_row(&mut self, path: PathBuf, is_dir: bool, event: &ClickEvent, cx: &mut Context<Self>) {
-        if event.click_count() == 2 && is_dir {
-            self.navigate(path, cx);
-            return;
-        }
-        self.selected = Some(path);
         cx.notify();
     }
 
@@ -248,6 +238,14 @@ impl Browser {
             )
     }
 
+    /// 名前の表示。編集中なら入力欄を出す。
+    pub fn name_or_input(&self, path: &Path, entry: &Entry) -> AnyElement {
+        match &self.renaming {
+            Some(renaming) if renaming.path == path => div().flex_1().min_w_0().child(renaming.input.clone()).into_any_element(),
+            _ => div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()).into_any_element(),
+        }
+    }
+
     fn name_cell(&mut self, depth: u32, folder: &Path, entry: &Entry, path: &Path, sub_text: u32, cx: &mut Context<Self>) -> AnyElement {
         let is_dir = entry.is_dir;
         let expanded = self.expanded.get(path);
@@ -276,14 +274,14 @@ impl Browser {
             .pl(px(depth as f32 * theme::INDENT))
             .child(disclosure)
             .child(self.icon(icon, is_dir, theme::ROW_ICON))
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()))
+            .child(self.name_or_input(path, entry))
             .children(note.map(|note| div().flex_none().text_color(rgb(sub_text)).child(note)))
             .into_any_element()
     }
 
     fn list_row(&mut self, ix: usize, depth: u32, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
-        let selected = self.selected.as_deref() == Some(path.as_path());
+        let selected = self.selection.contains(&path);
         let (selected_background, selected_text) = self.selection_colors();
         let background = match (selected, ix % 2 == 1) {
             (true, _) => selected_background,
@@ -306,7 +304,7 @@ impl Browser {
                 }
             })
             .collect();
-        div()
+        let row = div()
             .id(ix)
             .flex()
             .items_center()
@@ -317,9 +315,10 @@ impl Browser {
             .bg(rgb(background))
             .text_color(rgb(text))
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, event, _, cx| this.click_list_row(path.clone(), is_dir, event, cx)))
-            .children(cells)
+            .children(cells);
+        let click_path = path.clone();
+        self.item_mouse(row, path, is_dir, cx)
+            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
     fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -359,7 +358,11 @@ impl Browser {
             .min_h_0()
             .overflow_x_scroll()
             .track_scroll(&self.list_columns_scroll)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                this.commit_rename(window, cx);
+                this.clear_selection(cx);
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.folder_menu(cx)))
             .child(
                 div().flex().flex_col().h_full().min_w_full().w(px(total)).child(header).child(
                     div().flex_1().min_h_0().child(

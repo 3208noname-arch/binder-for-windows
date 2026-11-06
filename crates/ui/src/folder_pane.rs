@@ -3,7 +3,7 @@ use crate::list_tree::{Flattened, flatten, flatten_grouped};
 use filer_core::{
     Date, Entry, Group, GroupKey, Properties, SortKey, SortOrder, date_group, name_group, size_group, value_group,
 };
-use filer_shell::{ListJob, PropertiesJob, local_date, start_list, start_properties};
+use filer_shell::{ListJob, PropertiesJob, WatchJob, local_date, start_list, start_properties, watch_folder};
 use futures::StreamExt;
 use gpui::{Context, Task};
 use std::collections::HashMap;
@@ -24,6 +24,8 @@ pub struct FolderPane {
     loader: Option<Task<()>>,
     properties_job: Option<PropertiesJob>,
     properties_loader: Option<Task<()>>,
+    watch_job: Option<WatchJob>,
+    watch_loader: Option<Task<()>>,
     measure: Option<Measure>,
 }
 
@@ -81,6 +83,8 @@ impl FolderPane {
             loader: None,
             properties_job: None,
             properties_loader: None,
+            watch_job: None,
+            watch_loader: None,
             measure: None,
         };
         pane.open(path, cx);
@@ -127,6 +131,33 @@ impl FolderPane {
         self.properties_loader = None;
         self.version += 1;
         let generation = self.state.open(path.clone());
+        self.watch(path.clone(), cx);
+        self.start_listing(generation, path, cx);
+    }
+
+    /// 今のフォルダを読み直す。終わるまで今の一覧を見せ続ける。
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.properties_job = None;
+        self.properties_loader = None;
+        let generation = self.state.reload();
+        self.start_listing(generation, self.state.path.clone(), cx);
+    }
+
+    fn watch(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        self.watch_job = Some(watch_folder(path, move || {
+            let _ = tx.unbounded_send(());
+        }));
+        self.watch_loader = Some(cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
+                if this.update(cx, |pane, cx| pane.reload(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn start_listing(&mut self, generation: u64, path: PathBuf, cx: &mut Context<Self>) {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         self.job = Some(start_list(path, move |event| {
             let _ = tx.unbounded_send(event);

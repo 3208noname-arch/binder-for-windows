@@ -4,8 +4,8 @@ use crate::list_tree::{Flattened, Row};
 use crate::list_view::group_header;
 use crate::theme;
 use filer_core::{Date, Entry, GroupKey};
-use gpui::{AnyElement, ClickEvent, Context, MouseButton, Window, div, list, prelude::*, px, rgb};
-use std::path::{Path, PathBuf};
+use gpui::{AnyElement, Context, MouseButton, Window, div, list, prelude::*, px, rgb};
+use std::path::Path;
 use std::rc::Rc;
 
 /// アイコン表示の行の並びと、それを作った時の条件。
@@ -84,18 +84,9 @@ mod tests {
 }
 
 impl Browser {
-    fn click_cell(&mut self, path: PathBuf, is_dir: bool, event: &ClickEvent, cx: &mut Context<Self>) {
-        if event.click_count() == 2 && is_dir {
-            self.navigate(path, cx);
-            return;
-        }
-        self.selected = Some(path);
-        cx.notify();
-    }
-
     fn grid_cell(&self, ix: usize, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
-        let selected = self.selected.as_deref() == Some(path.as_path());
+        let selected = self.selection.contains(&path);
         let whole_cell = self.settings.grid_selection_matches_hover;
         let (selected_background, selected_text) = self.selection_colors();
         let is_dir = entry.is_dir;
@@ -110,8 +101,8 @@ impl Browser {
             .line_clamp(2)
             .when(selected, |l| l.text_color(rgb(selected_text)))
             .when(selected && !whole_cell, |l| l.bg(rgb(selected_background)))
-            .child(entry.name.clone());
-        div()
+            .child(self.name_or_input(&path, entry));
+        let cell = div()
             .id(("cell", ix))
             .flex()
             .flex_col()
@@ -123,10 +114,11 @@ impl Browser {
             .rounded_md()
             .when(!selected, |c| c.hover(|s| s.bg(rgb(theme::HOVER))))
             .when(selected && whole_cell, |c| c.bg(rgb(selected_background)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, event, _, cx| this.click_cell(path.clone(), is_dir, event, cx)))
             .child(self.icon(icon, is_dir, theme::GRID_ICON))
-            .child(label)
+            .child(label);
+        let click_path = path.clone();
+        self.item_mouse(cell, path, is_dir, cx)
+            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
     fn grid_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -172,11 +164,16 @@ impl Browser {
     pub fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let width: f32 = (window.viewport_size().width - px(theme::SIDEBAR_WIDTH + 16.)).into();
         let per_row = ((width / theme::GRID_CELL_WIDTH) as usize).max(1);
+        self.grid_per_row = per_row;
         self.refresh_grid(per_row, cx);
         div()
             .flex_1()
             .min_h_0()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                this.commit_rename(window, cx);
+                this.clear_selection(cx);
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.folder_menu(cx)))
             .child(
                 list(
                     self.grid_list.clone(),

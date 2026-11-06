@@ -1,16 +1,18 @@
+use crate::actions::{Renaming, RowPress};
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::icons_view::GridData;
 use crate::list_tree::Flattened;
 use crate::size_cache::SizeCache;
 use crate::theme;
-use filer_core::{Date, Entry, Field, FolderView, GroupKey, History, SortKey, SortOrder, ViewMode};
-use filer_shell::{drives, favorites, today};
+use filer_core::{Date, Entry, Field, FolderView, GroupKey, History, Selection, SortKey, SortOrder, ViewMode};
+use filer_shell::{Operation, drives, favorites, today};
 use filer_store::Store;
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, Entity, Image, ListAlignment, ListState, MouseButton,
+    AnyElement, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState, MouseButton,
     MouseMoveEvent, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb,
 };
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -76,7 +78,15 @@ pub struct Browser {
     pub view: FolderView,
     pub store: Option<Store>,
     pub pane: Entity<FolderPane>,
-    pub selected: Option<PathBuf>,
+    pub selection: Selection,
+    pub hwnd: isize,
+    pub focus: FocusHandle,
+    pub message: Option<String>,
+    pub renaming: Option<Renaming>,
+    pub pending_rename: Option<PathBuf>,
+    pub press: Option<RowPress>,
+    pub undo: Vec<Operation>,
+    pub grid_per_row: usize,
     pub list_scroll: UniformListScrollHandle,
     pub list_columns_scroll: ScrollHandle,
     pub grid_list: ListState,
@@ -108,6 +118,8 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
+        let focus = cx.focus_handle();
+        window.focus(&focus);
         let mut view = FolderView::for_folder(saved_view(&store, &path), ViewMode::List);
         if let Some(mode) = mode {
             view.mode = mode;
@@ -131,7 +143,15 @@ impl Browser {
             view,
             store,
             pane,
-            selected: None,
+            selection: Selection::default(),
+            hwnd: window_handle(window),
+            focus: focus.clone(),
+            message: None,
+            renaming: None,
+            pending_rename: None,
+            press: None,
+            undo: Vec::new(),
+            grid_per_row: 1,
             list_scroll: UniformListScrollHandle::new(),
             list_columns_scroll: ScrollHandle::new(),
             grid_list: ListState::new(0, ListAlignment::Top, px(theme::GRID_ROW_HEIGHT * 2.)),
@@ -190,8 +210,10 @@ impl Browser {
     }
 
     fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.selected = None;
+        self.selection.clear();
+        self.message = None;
         self.menu = None;
+        self.renaming = None;
         self.expanded.clear();
         self.sizes.update(cx, |sizes, _| sizes.cancel_running());
         self.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
@@ -208,19 +230,19 @@ impl Browser {
         cx.notify();
     }
 
-    fn go_back(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn back(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_back().map(PathBuf::from) {
             self.show(path, cx);
         }
     }
 
-    fn go_forward(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn forward(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.history.go_forward().map(PathBuf::from) {
             self.show(path, cx);
         }
     }
 
-    fn open_parent(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn parent(&mut self, cx: &mut Context<Self>) {
         if let Some(parent) = self.history.current().parent().map(PathBuf::from) {
             self.navigate(parent, cx);
         }
@@ -296,7 +318,8 @@ impl Browser {
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selected = None;
+        self.selection.clear();
+        self.menu = None;
         cx.notify();
     }
 
@@ -311,13 +334,16 @@ impl Browser {
     fn drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         // ウィンドウの外でボタンを離した時も、変えた幅は残す
         if event.pressed_button != Some(MouseButton::Left) {
+            self.press = None;
             if self.resizing.take().is_some() {
                 self.save_active_view(cx);
             }
             self.header_drag = None;
             return;
         }
-        if self.resizing.is_some() {
+        if self.press.is_some() {
+            self.drag_row(event, cx);
+        } else if self.resizing.is_some() {
             self.drag_resize(event, cx);
         } else if self.header_drag.is_some() {
             self.drag_header(event, window, cx);
@@ -325,6 +351,7 @@ impl Browser {
     }
 
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        self.end_press();
         if self.resizing.take().is_some() {
             self.save_active_view(cx);
         }
@@ -502,9 +529,9 @@ impl Browser {
             .bg(rgb(theme::BAR))
             .border_b_1()
             .border_color(rgb(theme::LINE))
-            .child(Self::tool_button("back", "‹", back).when(back, |b| b.on_click(cx.listener(Self::go_back))))
-            .child(Self::tool_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(Self::go_forward))))
-            .child(Self::tool_button("parent", "↑", up).when(up, |b| b.on_click(cx.listener(Self::open_parent))))
+            .child(Self::tool_button("back", "‹", back).when(back, |b| b.on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+            .child(Self::tool_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx)))))
+            .child(Self::tool_button("parent", "↑", up).when(up, |b| b.on_click(cx.listener(|this, _, _, cx| this.parent(cx)))))
             .child(div().flex_1().min_w_0().px_2().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(self.menu_button("sort", sort, Menu::Sort, cx))
             .child(self.menu_button("group", group, Menu::Group, cx))
@@ -597,14 +624,25 @@ impl Browser {
             .border_color(rgb(theme::LINE))
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .text_color(rgb(theme::SUB_TEXT))
+            .children(self.message.clone().map(|message| div().flex_none().text_color(rgb(theme::ERROR_TEXT)).child(message)))
             .child(div().flex_none().child(if state.loading {
                 format!("読み込み中… {count} 項目")
             } else if pane.properties_loading() {
                 format!("{count} 項目　プロパティを読み込み中… {}/{count}", pane.properties.len())
             } else {
-                format!("{count} 項目")
+                match self.selection.len() {
+                    0 => format!("{count} 項目"),
+                    selected => format!("{selected} / {count} 項目を選択"),
+                }
             }))
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(state.path.display().to_string()))
+    }
+}
+
+fn window_handle(window: &Window) -> isize {
+    match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
+        _ => 0,
     }
 }
 
@@ -615,6 +653,10 @@ fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_active = window.is_window_active();
+        if let Some(path) = self.pending_rename.take() {
+            self.selection.select_only(path.clone());
+            self.begin_rename(path, window, cx);
+        }
         let error = self.pane.read(cx).state.error.clone();
         let body = match (error, self.view.mode) {
             (Some(message), _) => div()
@@ -642,6 +684,12 @@ impl Render for Browser {
             .text_color(rgb(theme::TEXT))
             .text_size(px(theme::TEXT_SIZE))
             .font_family(theme::FONT)
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let target = this.current_folder(cx);
+                this.drop_paths(paths.paths(), target, window.modifiers().control, cx);
+            }))
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))
