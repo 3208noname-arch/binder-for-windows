@@ -1,3 +1,6 @@
+// release ではコンソールを開かない
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod actions;
 mod browser;
 mod columns_view;
