@@ -43,9 +43,43 @@ impl ListState {
     }
 }
 
+/// 溜まった列挙の結果を1つのバッチにまとめる。併合の回数を減らし、描画を止めないため。
+pub fn coalesce(events: Vec<ListEvent>) -> Vec<ListEvent> {
+    let mut joined = Vec::new();
+    let mut others = Vec::new();
+    for event in events {
+        match event {
+            ListEvent::Batch(batch) => joined.extend(batch),
+            other => others.push(other),
+        }
+    }
+    let mut result = Vec::with_capacity(others.len() + 1);
+    if !joined.is_empty() {
+        result.push(ListEvent::Batch(joined));
+    }
+    result.extend(others);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coalesce_joins_batches_before_final_event() {
+        let events = vec![
+            ListEvent::Batch(vec![file("a")]),
+            ListEvent::Batch(vec![file("b")]),
+            ListEvent::Done,
+        ];
+        let result = coalesce(events);
+        assert_eq!(result.len(), 2);
+        match &result[0] {
+            ListEvent::Batch(b) => assert_eq!(b.len(), 2),
+            _ => panic!("batch first"),
+        }
+        assert!(matches!(result[1], ListEvent::Done));
+    }
 
     fn file(name: &str) -> Entry {
         Entry { name: name.into(), is_dir: false, size: 0, modified: 0 }

@@ -1,4 +1,5 @@
 use crate::Entry;
+use rayon::slice::ParallelSliceMut;
 use std::cmp::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +37,7 @@ fn compare_ignore_case(a: &str, b: &str) -> Ordering {
 }
 
 pub fn sort_entries(entries: &mut [Entry], order: SortOrder, cmp: NameCmp) {
-    entries.sort_by(|a, b| compare(a, b, order, cmp));
+    entries.par_sort_by(|a, b| compare(a, b, order, cmp));
 }
 
 /// 並べ替え済みの `entries` へ `batch` を併合する。

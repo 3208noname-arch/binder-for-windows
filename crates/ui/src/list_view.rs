@@ -1,4 +1,4 @@
-use crate::list_state::ListState;
+use crate::list_state::{ListState, coalesce};
 use crate::theme;
 use filer_core::{Entry, SortKey, SortOrder, format_size, kind_of};
 use filer_shell::{ListJob, format_time, start_list};
@@ -9,7 +9,7 @@ use gpui::{
 };
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct ListView {
     state: ListState,
@@ -23,6 +23,20 @@ pub struct ListView {
 struct Measure {
     start: Instant,
     first_row_seen: bool,
+    reopened: bool,
+}
+
+const MERGE_INTERVAL: Duration = Duration::from_millis(8);
+
+/// 測定用に順番を崩す。Rustの並べ替えは整列済みの入力で速いので、そのままでは測れない。
+fn shuffle(entries: &mut [Entry]) {
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    for i in (1..entries.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        entries.swap(i, (seed % (i as u64 + 1)) as usize);
+    }
 }
 
 impl ListView {
@@ -54,7 +68,7 @@ impl ListView {
                     events.push(event);
                 }
                 let applied = this.update(cx, |view, cx| {
-                    for event in events {
+                    for event in coalesce(events) {
                         view.state.apply(generation, event);
                     }
                     cx.notify();
@@ -62,6 +76,8 @@ impl ListView {
                 if applied.is_err() {
                     break;
                 }
+                // 描画の順番を譲り、その間に届いた分をまとめて併合する
+                cx.background_executor().timer(MERGE_INTERVAL).await;
             }
             let _ = this.update(cx, |view, cx| view.finish_measure(cx));
         }));
@@ -70,18 +86,26 @@ impl ListView {
 
     /// `--measure` の時だけ呼ぶ。測定の開始時刻を覚える。
     pub fn measure_from(&mut self, start: Instant) {
-        self.measure = Some(Measure { start, first_row_seen: false });
+        self.measure = Some(Measure { start, first_row_seen: false, reopened: false });
     }
 
     fn finish_measure(&mut self, cx: &mut Context<Self>) {
-        let Some(measure) = &self.measure else { return };
+        let Some(measure) = &mut self.measure else { return };
         println!("all_entries_ms={} count={}", measure.start.elapsed().as_millis(), self.state.entries.len());
+        if measure.reopened {
+            cx.quit();
+            return;
+        }
         for key in [SortKey::Modified, SortKey::Size, SortKey::Kind, SortKey::Name] {
+            shuffle(&mut self.state.entries);
             let started = Instant::now();
             self.state.set_order(SortOrder { key, descending: false });
             println!("sort_{key:?}_ms={}", started.elapsed().as_millis());
         }
-        cx.quit();
+        // 2回目は、起動の時間を含まないフォルダ移動の時間を測る
+        *measure = Measure { start: Instant::now(), first_row_seen: false, reopened: true };
+        let path = self.state.path.clone();
+        self.open(path, cx);
     }
 
     fn open_parent(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -168,7 +192,8 @@ impl Render for ListView {
             && !self.state.entries.is_empty()
         {
             measure.first_row_seen = true;
-            println!("first_row_ms={}", measure.start.elapsed().as_millis());
+            let label = if measure.reopened { "reopen_first_row_ms" } else { "first_row_ms" };
+            println!("{label}={}", measure.start.elapsed().as_millis());
         }
         let title =self.state.path.file_name().map_or_else(
             || self.state.path.display().to_string(),
