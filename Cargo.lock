@@ -1644,6 +1644,7 @@ name = "filer-shell"
 version = "0.1.0"
 dependencies = [
  "filer-core",
+ "png 0.17.16",
  "tempfile",
  "windows 0.61.3",
 ]

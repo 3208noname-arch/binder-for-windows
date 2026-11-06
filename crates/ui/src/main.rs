@@ -1,9 +1,15 @@
+mod browser;
+mod columns_view;
+mod folder_pane;
+mod icon_cache;
+mod icons_view;
 mod list_state;
+mod list_tree;
 mod list_view;
 mod theme;
 
+use browser::{Browser, ViewMode};
 use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};
-use list_view::ListView;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -17,23 +23,33 @@ fn start_path() -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }
 
+fn start_mode() -> ViewMode {
+    let has = |flag: &str| std::env::args_os().any(|arg| arg == flag);
+    if has("--columns") {
+        ViewMode::Columns
+    } else if has("--icons") {
+        ViewMode::Icons
+    } else {
+        ViewMode::List
+    }
+}
+
 fn main() {
     let start = Instant::now();
-    let measure = std::env::args_os().any(|arg| arg == "--measure");
+    let measure = std::env::args_os().any(|arg| arg == "--measure").then_some(start);
     let path = start_path();
     Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..Default::default()
         };
+        let mode = start_mode();
         cx.open_window(options, move |_, cx| {
             cx.new(|cx| {
-                let mut view = ListView::new(path, cx);
-                if measure {
-                    view.measure_from(start);
-                }
-                view
+                let mut browser = Browser::new(path, measure, cx);
+                browser.mode = mode;
+                browser
             })
         })
         .unwrap();

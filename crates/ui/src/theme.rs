@@ -2,21 +2,35 @@
 
 pub const FONT: &str = "Yu Gothic UI";
 pub const TEXT_SIZE: f32 = 13.0;
+pub const SMALL_TEXT_SIZE: f32 = 12.0;
 pub const ROW_HEIGHT: f32 = 24.0;
 pub const TOOLBAR_HEIGHT: f32 = 44.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
 pub const DATE_WIDTH: f32 = 150.0;
 pub const SIZE_WIDTH: f32 = 90.0;
 pub const KIND_WIDTH: f32 = 110.0;
+pub const SIDEBAR_WIDTH: f32 = 190.0;
+pub const COLUMN_WIDTH: f32 = 230.0;
+pub const PREVIEW_WIDTH: f32 = 260.0;
+pub const ROW_ICON: f32 = 16.0;
+pub const PREVIEW_ICON: f32 = 128.0;
+pub const INDENT: f32 = 18.0;
+pub const DISCLOSURE_WIDTH: f32 = 14.0;
+pub const GRID_CELL_WIDTH: f32 = 120.0;
+pub const GRID_ROW_HEIGHT: f32 = 118.0;
+pub const GRID_ICON: f32 = 72.0;
 
 pub const BACKGROUND: u32 = 0xffffff;
 pub const BAR: u32 = 0xf6f6f7;
+pub const SIDEBAR: u32 = 0xeef0f3;
 pub const LINE: u32 = 0xdcdde0;
 pub const TEXT: u32 = 0x1f2023;
 pub const SUB_TEXT: u32 = 0x73767c;
+pub const DISABLED_TEXT: u32 = 0xb4b6bb;
 pub const STRIPE: u32 = 0xf4f5f7;
 pub const HOVER: u32 = 0xe4e6ea;
 pub const SELECTED: u32 = 0x0a64d8;
 pub const SELECTED_TEXT: u32 = 0xffffff;
+pub const SEGMENT: u32 = 0xdfe1e5;
 pub const FOLDER: u32 = 0x4aa3e8;
 pub const FILE: u32 = 0xb8bbc1;

@@ -1,7 +1,9 @@
 //! Windows APIにも画面にも依存しない、ファイラーの中心の処理。
 
 mod entry;
+mod history;
 mod sort;
 
 pub use entry::{Entry, format_size, kind_of};
+pub use history::History;
 pub use sort::{NameCmp, SortKey, SortOrder, insert_sorted, sort_entries};
