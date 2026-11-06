@@ -1,5 +1,5 @@
-use filer_core::Entry;
-use std::collections::HashMap;
+use filer_core::{Entry, Group};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// リストの1行が、どのフォルダの何番目の項目かを表す。
@@ -10,10 +10,16 @@ pub struct TreeRow {
     pub entry: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    Item(TreeRow),
+    Header { label: String, count: usize },
+}
+
 /// 開いているフォルダを、表示する行の並びへ展開する。
 pub struct Flattened {
     pub folders: Vec<PathBuf>,
-    pub rows: Vec<TreeRow>,
+    pub rows: Vec<Row>,
 }
 
 pub fn flatten(root: &Path, lists: &HashMap<PathBuf, &[Entry]>) -> Flattened {
@@ -27,7 +33,7 @@ fn walk(folder: &Path, depth: u32, lists: &HashMap<PathBuf, &[Entry]>, flat: &mu
     let folder_ix = flat.folders.len() as u32;
     flat.folders.push(folder.to_path_buf());
     for (i, entry) in list.iter().enumerate() {
-        flat.rows.push(TreeRow { depth, folder: folder_ix, entry: i as u32 });
+        flat.rows.push(Row::Item(TreeRow { depth, folder: folder_ix, entry: i as u32 }));
         // 何も開いていない時は、行ごとのパスの組み立てを省く
         if entry.is_dir && lists.len() > 1 {
             walk(&folder.join(entry.os_name()), depth + 1, lists, flat);
@@ -35,22 +41,71 @@ fn walk(folder: &Path, depth: u32, lists: &HashMap<PathBuf, &[Entry]>, flat: &mu
     }
 }
 
+/// 先頭の階層の項目をグループに分け、見出しの行を挟んで展開する。
+pub fn flatten_grouped(
+    root: &Path,
+    lists: &HashMap<PathBuf, &[Entry]>,
+    group_of: &dyn Fn(&Entry) -> Group,
+) -> Flattened {
+    let mut flat = Flattened { folders: vec![root.to_path_buf()], rows: Vec::new() };
+    let Some(list) = lists.get(root) else { return flat };
+    let mut groups: BTreeMap<Group, Vec<usize>> = BTreeMap::new();
+    for (i, entry) in list.iter().enumerate() {
+        groups.entry(group_of(entry)).or_default().push(i);
+    }
+    for (group, members) in groups {
+        flat.rows.push(Row::Header { label: group.label, count: members.len() });
+        for i in members {
+            flat.rows.push(Row::Item(TreeRow { depth: 0, folder: 0, entry: i as u32 }));
+            if list[i].is_dir && lists.len() > 1 {
+                walk(&root.join(list[i].os_name()), 1, lists, &mut flat);
+            }
+        }
+    }
+    flat
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn groups_get_headers_with_counts_in_rank_order() {
+        let root = [dir("late"), file("a"), file("late2")];
+        let lists = HashMap::from([(PathBuf::from("r"), &root[..])]);
+        let group_of = |e: &Entry| {
+            let late = e.name.starts_with("late");
+            Group { rank: late as u32, label: if late { "後".into() } else { "先".into() } }
+        };
+        let flat = flatten_grouped(Path::new("r"), &lists, &group_of);
+        let headers: Vec<_> = flat
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Header { label, count } => Some((label.as_str(), *count)),
+                Row::Item(_) => None,
+            })
+            .collect();
+        assert_eq!(headers, [("先", 1), ("後", 2)]);
+        assert_eq!(flat.rows.len(), 5);
+        assert!(matches!(flat.rows[0], Row::Header { .. }));
+    }
+
     fn dir(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: true, size: 0, modified: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: true, size: 0, modified: 0, created: 0 }
     }
     fn file(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: false, size: 0, modified: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, size: 0, modified: 0, created: 0 }
     }
     fn shape(flat: &Flattened, lists: &HashMap<PathBuf, &[Entry]>) -> Vec<(u32, String)> {
         flat.rows
             .iter()
-            .map(|r| {
-                let list = lists[&flat.folders[r.folder as usize]];
-                (r.depth, list[r.entry as usize].name.clone())
+            .filter_map(|r| match r {
+                Row::Item(r) => {
+                    let list = lists[&flat.folders[r.folder as usize]];
+                    Some((r.depth, list[r.entry as usize].name.clone()))
+                }
+                Row::Header { .. } => None,
             })
             .collect()
     }

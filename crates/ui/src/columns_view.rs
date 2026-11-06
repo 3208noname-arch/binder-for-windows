@@ -40,7 +40,16 @@ impl Browser {
         let width = resized_width(resize.start_width, resize.start_x, event.position.x.into());
         if let Some(column) = self.columns.get_mut(resize.column) {
             column.width = width;
-            self.column_width = width;
+            cx.notify();
+        }
+    }
+
+    /// 列の余白を押した時は、その列の選択を解いて右の列を閉じる。
+    fn clear_column(&mut self, column: usize, cx: &mut Context<Self>) {
+        if let Some(current) = self.columns.get_mut(column) {
+            current.selected = None;
+            self.columns.truncate(column + 1);
+            self.preview = None;
             cx.notify();
         }
     }
@@ -59,7 +68,7 @@ impl Browser {
         if entry.is_dir {
             self.preview = None;
             let pane = self.new_pane(path, cx);
-            let width = self.column_width;
+            let width = self.settings.default_column_width;
             self.columns.push(Column { pane, scroll: UniformListScrollHandle::new(), selected: None, width });
         } else {
             self.preview = Some((folder, entry));
@@ -72,6 +81,7 @@ impl Browser {
     fn column_rows(&mut self, column: usize, range: Range<usize>, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
         let Some(current) = self.columns.get(column) else { return Vec::new() };
         let selected = current.selected.clone();
+        let (selected_background, selected_text) = self.selection_colors();
         let (folder, entries): (PathBuf, Vec<Option<Entry>>) = {
             let state = &current.pane.read(cx).state;
             (state.path.clone(), range.clone().map(|ix| state.entries.get(ix).cloned()).collect())
@@ -82,7 +92,7 @@ impl Browser {
                 let entry = entry?;
                 let active = selected.as_deref() == Some(entry.os_name());
                 let background = match (active, ix % 2 == 1) {
-                    (true, _) => theme::SELECTED,
+                    (true, _) => selected_background,
                     (false, true) => theme::STRIPE,
                     (false, false) => theme::BACKGROUND,
                 };
@@ -101,8 +111,9 @@ impl Browser {
                         .h(px(theme::ROW_HEIGHT))
                         .px_2()
                         .bg(rgb(background))
-                        .text_color(rgb(if active { theme::SELECTED_TEXT } else { theme::TEXT }))
+                        .text_color(rgb(if active { selected_text } else { theme::TEXT }))
                         .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, event, _, cx| {
                             this.select_in_column(column, name.clone(), entry.clone(), event, cx)
                         }))
@@ -154,6 +165,7 @@ impl Browser {
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::LINE))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.clear_column(column, cx)))
             .child(body)
             .child(handle)
     }

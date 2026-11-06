@@ -2,7 +2,7 @@ use crate::browser::Browser;
 use crate::icon_cache::LARGE;
 use crate::theme;
 use filer_core::Entry;
-use gpui::{ClickEvent, Context, Window, div, prelude::*, px, rgb, uniform_list};
+use gpui::{ClickEvent, Context, MouseButton, Window, div, prelude::*, px, rgb, uniform_list};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -20,6 +20,7 @@ impl Browser {
         let path = folder.join(entry.os_name());
         let selected = self.selected.as_deref() == Some(path.as_path());
         let whole_cell = self.settings.grid_selection_matches_hover;
+        let (selected_background, selected_text) = self.selection_colors();
         let is_dir = entry.is_dir;
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, LARGE));
         let label = div()
@@ -30,8 +31,8 @@ impl Browser {
             .text_center()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .line_clamp(2)
-            .when(selected, |l| l.text_color(rgb(theme::SELECTED_TEXT)))
-            .when(selected && !whole_cell, |l| l.bg(rgb(theme::SELECTED)))
+            .when(selected, |l| l.text_color(rgb(selected_text)))
+            .when(selected && !whole_cell, |l| l.bg(rgb(selected_background)))
             .child(entry.name.clone());
         div()
             .id(("cell", ix))
@@ -44,7 +45,8 @@ impl Browser {
             .w(px(theme::GRID_CELL_WIDTH))
             .rounded_md()
             .when(!selected, |c| c.hover(|s| s.bg(rgb(theme::HOVER))))
-            .when(selected && whole_cell, |c| c.bg(rgb(theme::SELECTED)))
+            .when(selected && whole_cell, |c| c.bg(rgb(selected_background)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, event, _, cx| this.click_cell(path.clone(), is_dir, event, cx)))
             .child(self.icon(icon, is_dir, theme::GRID_ICON))
             .child(label)
@@ -77,7 +79,7 @@ impl Browser {
         let width: f32 = (window.viewport_size().width - px(theme::SIDEBAR_WIDTH + 16.)).into();
         let per_row = ((width / theme::GRID_CELL_WIDTH) as usize).max(1);
         let rows = self.pane.read(cx).state.entries.len().div_ceil(per_row);
-        div().flex_1().min_h_0().child(
+        div().flex_1().min_h_0().on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx))).child(
             uniform_list(
                 "grid",
                 rows,

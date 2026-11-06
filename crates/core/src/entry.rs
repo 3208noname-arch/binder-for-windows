@@ -11,6 +11,8 @@ pub struct Entry {
     pub size: u64,
     /// 更新日時（FILETIME、1601年からの100ナノ秒）
     pub modified: i64,
+    /// 作成日時（FILETIME）
+    pub created: i64,
 }
 
 impl Entry {

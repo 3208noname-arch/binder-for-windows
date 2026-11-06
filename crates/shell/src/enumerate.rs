@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
     FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
@@ -108,13 +108,14 @@ fn to_entry(data: &WIN32_FIND_DATAW) -> Option<Entry> {
     if name == "." || name == ".." {
         return None;
     }
-    let time = data.ftLastWriteTime;
+    let to_i64 = |t: FILETIME| (i64::from(t.dwHighDateTime) << 32) | i64::from(t.dwLowDateTime);
     Some(Entry {
         name,
         raw_name,
         is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
         size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
-        modified: (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime),
+        modified: to_i64(data.ftLastWriteTime),
+        created: to_i64(data.ftCreationTime),
     })
 }
 

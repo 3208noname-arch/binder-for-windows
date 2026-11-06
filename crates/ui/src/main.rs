@@ -45,9 +45,9 @@ fn main() {
             ..Default::default()
         };
         let mode = start_mode();
-        cx.open_window(options, move |_, cx| {
+        cx.open_window(options, move |window, cx| {
             cx.new(|cx| {
-                let mut browser = Browser::new(path, measure, cx);
+                let mut browser = Browser::new(path, measure, window, cx);
                 browser.mode = mode;
                 browser
             })

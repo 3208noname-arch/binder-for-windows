@@ -3,9 +3,11 @@
 mod enumerate;
 mod icons;
 mod name_cmp;
+mod properties;
 mod time;
 
 pub use enumerate::{ListEvent, ListJob, long_path, should_flush, start_list};
 pub use icons::{drives, favorites, init_thread, load_icon};
 pub use name_cmp::compare_names;
-pub use time::format_time;
+pub use properties::{PropertiesJob, read_properties, start_properties};
+pub use time::{format_time, local_date, today};

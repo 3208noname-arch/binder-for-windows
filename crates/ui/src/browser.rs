@@ -1,7 +1,8 @@
 use crate::folder_pane::FolderPane;
 use crate::icon_cache::IconCache;
+use crate::list_tree::Flattened;
 use crate::theme;
-use filer_core::{Entry, History, SortKey, SortOrder};
+use filer_core::{Date, Entry, GroupKey, History, SortKey, SortOrder};
 use filer_shell::{drives, favorites};
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, Entity, Image, ScrollHandle,
@@ -10,6 +11,7 @@ use gpui::{
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -39,12 +41,24 @@ pub struct ColumnResize {
 pub struct Settings {
     /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
     pub grid_selection_matches_hover: bool,
+    /// カラムを開いた時の幅
+    pub default_column_width: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { grid_selection_matches_hover: true }
+        Self { grid_selection_matches_hover: true, default_column_width: theme::COLUMN_WIDTH }
     }
+}
+
+/// リストの行の並びが古くなっていないかを判断する材料。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TreeKey {
+    pub root_version: u64,
+    pub expanded_version: u64,
+    pub expanded_count: usize,
+    pub group: GroupKey,
+    pub today: Date,
 }
 
 /// ウィンドウ全体。履歴と表示形式を持ち、3つの表示へ分ける。
@@ -58,9 +72,12 @@ pub struct Browser {
     pub grid_scroll: UniformListScrollHandle,
     pub columns: Vec<Column>,
     pub columns_scroll: ScrollHandle,
-    pub column_width: f32,
     pub resizing: Option<ColumnResize>,
     pub settings: Settings,
+    pub group: GroupKey,
+    pub group_menu_open: bool,
+    pub tree_cache: Option<(TreeKey, Rc<Flattened>)>,
+    pub window_active: bool,
     pub preview: Option<(PathBuf, Entry)>,
     pub expanded: HashMap<PathBuf, Entity<FolderPane>>,
     pub icons: Entity<IconCache>,
@@ -69,7 +86,8 @@ pub struct Browser {
 }
 
 impl Browser {
-    pub fn new(path: PathBuf, measure: Option<Instant>, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: PathBuf, measure: Option<Instant>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         let order = SortOrder { key: SortKey::Name, descending: false };
         let pane = cx.new(|cx| {
             let mut pane = FolderPane::new(path.clone(), order, cx);
@@ -91,9 +109,12 @@ impl Browser {
             grid_scroll: UniformListScrollHandle::new(),
             columns: Vec::new(),
             columns_scroll: ScrollHandle::new(),
-            column_width: theme::COLUMN_WIDTH,
             resizing: None,
             settings: Settings::default(),
+            group: GroupKey::None,
+            group_menu_open: false,
+            tree_cache: None,
+            window_active: true,
             preview: None,
             expanded: HashMap::new(),
             icons,
@@ -113,7 +134,7 @@ impl Browser {
 
     fn reset_columns(&mut self) {
         let pane = self.pane.clone();
-        let width = self.column_width;
+        let width = self.settings.default_column_width;
         self.columns = vec![Column { pane, scroll: UniformListScrollHandle::new(), selected: None, width }];
         self.preview = None;
     }
@@ -162,6 +183,73 @@ impl Browser {
         for pane in panes.collect::<Vec<_>>() {
             pane.update(cx, |pane, cx| pane.set_order(order, cx));
         }
+    }
+
+    /// 選択の色。別のウィンドウへ移った時は灰色にする。
+    pub fn selection_colors(&self) -> (u32, u32) {
+        if self.window_active {
+            (theme::SELECTED, theme::SELECTED_TEXT)
+        } else {
+            (theme::SELECTED_INACTIVE, theme::TEXT)
+        }
+    }
+
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        cx.notify();
+    }
+
+    fn set_group(&mut self, key: GroupKey, cx: &mut Context<Self>) {
+        self.group = key;
+        self.group_menu_open = false;
+        let wants = key.needs_properties();
+        self.pane.update(cx, |pane, cx| pane.set_wants_properties(wants, cx));
+        cx.notify();
+    }
+
+    fn group_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        div()
+            .id("group")
+            .flex_none()
+            .px_2()
+            .rounded_md()
+            .cursor(CursorStyle::PointingHand)
+            .hover(|s| s.bg(rgb(theme::HOVER)))
+            .child(format!("グループ: {} ▾", self.group.label()))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.group_menu_open = !this.group_menu_open;
+                cx.notify();
+            }))
+    }
+
+    fn group_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let items: Vec<_> = GroupKey::ALL
+            .iter()
+            .map(|&key| {
+                div()
+                    .id(gpui::ElementId::Name(format!("group-{key:?}").into()))
+                    .px_3()
+                    .py_0p5()
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|s| s.bg(rgb(theme::HOVER)))
+                    .when(key == self.group, |item| item.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(key.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_group(key, cx)))
+            })
+            .collect();
+        div()
+            .absolute()
+            .top(px(theme::TOOLBAR_HEIGHT))
+            .right(px(theme::GROUP_MENU_RIGHT))
+            .w(px(theme::GROUP_MENU_WIDTH))
+            .py_1()
+            .rounded_md()
+            .bg(rgb(theme::BACKGROUND))
+            .border_1()
+            .border_color(rgb(theme::LINE))
+            .shadow_md()
+            .occlude()
+            .children(items)
     }
 
     /// 行のアイコン。届く前は仮の図形を出す。
@@ -221,6 +309,7 @@ impl Browser {
             .child(Self::tool_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(Self::go_forward))))
             .child(Self::tool_button("parent", "↑", up).when(up, |b| b.on_click(cx.listener(Self::open_parent))))
             .child(div().flex_1().min_w_0().px_2().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+            .when(self.mode == ViewMode::List, |bar| bar.child(self.group_button(cx)))
             .child(
                 div()
                     .flex()
@@ -294,8 +383,10 @@ impl Browser {
     }
 
     fn status(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let state = &self.pane.read(cx).state;
+        let pane = self.pane.read(cx);
+        let state = &pane.state;
         let count = state.entries.len();
+        let reading = self.mode == ViewMode::List && pane.properties_loading();
         div()
             .flex()
             .flex_none()
@@ -311,6 +402,8 @@ impl Browser {
             .text_color(rgb(theme::SUB_TEXT))
             .child(div().flex_none().child(if state.loading {
                 format!("読み込み中… {count} 項目")
+            } else if reading {
+                format!("{count} 項目　プロパティを読み込み中… {}/{count}", pane.properties.len())
             } else {
                 format!("{count} 項目")
             }))
@@ -320,6 +413,7 @@ impl Browser {
 
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_active = window.is_window_active();
         let error = self.pane.read(cx).state.error.clone();
         let body = match (error, self.mode) {
             (Some(message), _) => div()
@@ -337,7 +431,9 @@ impl Render for Browser {
         let toolbar = self.toolbar(cx);
         let sidebar = self.sidebar(cx);
         let status = self.status(cx);
+        let menu = (self.group_menu_open && self.mode == ViewMode::List).then(|| self.group_menu(cx));
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -350,5 +446,6 @@ impl Render for Browser {
             .child(toolbar)
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
             .child(status)
+            .children(menu)
     }
 }

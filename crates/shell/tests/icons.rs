@@ -41,6 +41,22 @@ fn missing_file_has_no_icon() {
 }
 
 #[test]
+fn plain_text_has_empty_properties() {
+    init_thread();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "x").unwrap();
+    assert_eq!(filer_shell::read_properties(&file), filer_core::Properties::default());
+}
+
+#[test]
+fn local_date_of_mid_year_is_in_2026() {
+    let date = filer_shell::local_date(134_273_376_000_000_000);
+    assert_eq!(date.year, 2026);
+    assert!(date.month == 6 || date.month == 7);
+}
+
+#[test]
 fn drives_include_system_drive() {
     assert!(drives().iter().any(|d| d == Path::new(r"C:\")));
 }

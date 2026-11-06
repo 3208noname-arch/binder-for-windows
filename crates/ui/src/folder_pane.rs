@@ -1,8 +1,10 @@
 use crate::list_state::{ListState, coalesce};
-use filer_core::{Entry, SortKey, SortOrder};
-use filer_shell::{ListJob, start_list};
+use filer_core::{Entry, Properties, SortKey, SortOrder};
+use filer_shell::{ListJob, PropertiesJob, start_list, start_properties};
 use futures::StreamExt;
 use gpui::{Context, Task};
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -11,8 +13,14 @@ const MERGE_INTERVAL: Duration = Duration::from_millis(8);
 /// 1つのフォルダの一覧。3つの表示と入れ子で共有する。
 pub struct FolderPane {
     pub state: ListState,
+    pub properties: HashMap<OsString, Properties>,
+    /// 中身が変わるたびに増える。行の並びの作り直しの判断に使う
+    pub version: u64,
+    wants_properties: bool,
     job: Option<ListJob>,
     loader: Option<Task<()>>,
+    properties_job: Option<PropertiesJob>,
+    properties_loader: Option<Task<()>>,
     measure: Option<Measure>,
 }
 
@@ -37,12 +45,60 @@ impl FolderPane {
     pub fn new(path: PathBuf, order: SortOrder, cx: &mut Context<Self>) -> Self {
         let mut state = ListState::new(path.clone());
         state.order = order;
-        let mut pane = Self { state, job: None, loader: None, measure: None };
+        let mut pane = Self {
+            state,
+            properties: HashMap::new(),
+            version: 0,
+            wants_properties: false,
+            job: None,
+            loader: None,
+            properties_job: None,
+            properties_loader: None,
+            measure: None,
+        };
         pane.open(path, cx);
         pane
     }
 
+    /// 作成者などでのグループ分けに使う時だけ、裏でプロパティを読む。
+    pub fn set_wants_properties(&mut self, wants: bool, cx: &mut Context<Self>) {
+        self.wants_properties = wants;
+        self.start_properties(cx);
+    }
+
+    /// 読み終えていなければ真。
+    pub fn properties_loading(&self) -> bool {
+        self.wants_properties && self.properties.len() < self.state.entries.len()
+    }
+
+    fn start_properties(&mut self, cx: &mut Context<Self>) {
+        if !self.wants_properties || self.state.loading || self.properties_job.is_some() {
+            return;
+        }
+        let names = self.state.entries.iter().map(|e| e.os_name().to_os_string()).collect();
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        self.properties_job = Some(start_properties(self.state.path.clone(), names, move |batch| {
+            let _ = tx.unbounded_send(batch);
+        }));
+        self.properties_loader = Some(cx.spawn(async move |this, cx| {
+            while let Some(batch) = rx.next().await {
+                let applied = this.update(cx, |pane, cx| {
+                    pane.properties.extend(batch);
+                    pane.version += 1;
+                    cx.notify();
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
     pub fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.properties.clear();
+        self.properties_job = None;
+        self.properties_loader = None;
+        self.version += 1;
         let generation = self.state.open(path.clone());
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         self.job = Some(start_list(path, move |event| {
@@ -58,6 +114,7 @@ impl FolderPane {
                     for event in coalesce(events) {
                         pane.state.apply(generation, event);
                     }
+                    pane.version += 1;
                     pane.note_first_row();
                     cx.notify();
                 });
@@ -67,13 +124,17 @@ impl FolderPane {
                 // 描画の順番を譲り、その間に届いた分をまとめて併合する
                 cx.background_executor().timer(MERGE_INTERVAL).await;
             }
-            let _ = this.update(cx, |pane, cx| pane.finish_measure(cx));
+            let _ = this.update(cx, |pane, cx| {
+                pane.start_properties(cx);
+                pane.finish_measure(cx);
+            });
         }));
         cx.notify();
     }
 
     pub fn set_order(&mut self, order: SortOrder, cx: &mut Context<Self>) {
         self.state.set_order(order);
+        self.version += 1;
         cx.notify();
     }
 

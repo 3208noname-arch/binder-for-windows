@@ -1,25 +1,84 @@
-use crate::browser::Browser;
+use crate::browser::{Browser, TreeKey};
 use crate::icon_cache::SMALL;
-use crate::list_tree::{Flattened, flatten};
+use crate::list_tree::{Flattened, Row, flatten, flatten_grouped};
 use crate::theme;
-use filer_core::{Entry, SortKey, format_size, kind_of};
-use filer_shell::format_time;
-use gpui::{ClickEvent, Context, CursorStyle, Div, Stateful, Window, div, prelude::*, px, rgb, uniform_list};
+use filer_core::{
+    Date, Entry, Group, GroupKey, Properties, SortKey, date_group, format_size, kind_of, name_group, size_group,
+    value_group,
+};
+use filer_shell::{format_time, local_date, today};
+use gpui::{
+    AnyElement, ClickEvent, Context, CursorStyle, Div, MouseButton, Stateful, Window, div, prelude::*, px, rgb,
+    uniform_list,
+};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+fn group_header(ix: usize, label: &str, count: usize) -> AnyElement {
+    div()
+        .id(ix)
+        .flex()
+        .items_end()
+        .gap_2()
+        .w_full()
+        .h(px(theme::ROW_HEIGHT))
+        .px_3()
+        .pb_0p5()
+        .border_b_1()
+        .border_color(rgb(theme::LINE))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(label.to_string())
+        .child(div().text_color(rgb(theme::SUB_TEXT)).child(format!("（{count}）")))
+        .into_any_element()
+}
+
+fn group_of(entry: &Entry, key: GroupKey, properties: Option<&Properties>, today: Date) -> Group {
+    let value = |read: fn(&Properties) -> &str| value_group(properties.map_or("", read));
+    match key {
+        GroupKey::None | GroupKey::Name => name_group(&entry.name),
+        GroupKey::Modified => date_group(local_date(entry.modified), today),
+        GroupKey::Created => date_group(local_date(entry.created), today),
+        GroupKey::Size => size_group(entry),
+        GroupKey::Author => value(|p| &p.author),
+        GroupKey::Tags => value(|p| &p.tags),
+        GroupKey::Title => value(|p| &p.title),
+    }
+}
+
 impl Browser {
-    /// 今の行の並び。開いているフォルダの子を親の下へ展開する。
-    fn tree(&self, cx: &Context<Self>) -> Flattened {
+    /// 今の行の並び。開いているフォルダの子を親の下へ展開する。中身が変わるまでは作り直さない。
+    fn tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
         let root = self.pane.read(cx);
+        let today = today();
+        let key = TreeKey {
+            root_version: root.version,
+            expanded_version: self.expanded.values().map(|pane| pane.read(cx).version).sum(),
+            expanded_count: self.expanded.len(),
+            group: self.group,
+            today,
+        };
+        if let Some((cached, tree)) = &self.tree_cache
+            && *cached == key
+        {
+            return tree.clone();
+        }
         let mut lists: HashMap<PathBuf, &[Entry]> = HashMap::new();
         lists.insert(root.state.path.clone(), &root.state.entries);
         for (path, pane) in &self.expanded {
             lists.insert(path.clone(), &pane.read(cx).state.entries);
         }
-        flatten(&root.state.path, &lists)
+        let group = self.group;
+        let flat = match group {
+            GroupKey::None => flatten(&root.state.path, &lists),
+            _ => flatten_grouped(&root.state.path, &lists, &|entry| {
+                group_of(entry, group, root.properties.get(entry.os_name()), today)
+            }),
+        };
+        let tree = Rc::new(flat);
+        self.tree_cache = Some((key, tree.clone()));
+        tree
     }
 
     fn list_entry(&self, folder: &Path, index: usize, cx: &Context<Self>) -> Option<Entry> {
@@ -68,13 +127,14 @@ impl Browser {
         let expanded = self.expanded.get(&path);
         let note = expanded.and_then(|pane| pane.read(cx).state.note());
         let expanded = expanded.is_some();
+        let (selected_background, selected_text) = self.selection_colors();
         let background = match (selected, ix % 2 == 1) {
-            (true, _) => theme::SELECTED,
+            (true, _) => selected_background,
             (false, true) => theme::STRIPE,
             (false, false) => theme::BACKGROUND,
         };
-        let sub_text = if selected { theme::SELECTED_TEXT } else { theme::SUB_TEXT };
-        let text = if selected { theme::SELECTED_TEXT } else { theme::TEXT };
+        let sub_text = if selected { selected_text } else { theme::SUB_TEXT };
+        let text = if selected { selected_text } else { theme::TEXT };
         let is_dir = entry.is_dir;
         let size = if is_dir { "--".to_string() } else { format_size(entry.size) };
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
@@ -103,6 +163,7 @@ impl Browser {
             .bg(rgb(background))
             .text_color(rgb(text))
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, event, _, cx| this.click_list_row(path.clone(), is_dir, event, cx)))
             .child(
                 div()
@@ -122,13 +183,15 @@ impl Browser {
             .child(div().flex_none().w(px(theme::KIND_WIDTH)).text_color(rgb(sub_text)).child(kind_of(entry)))
     }
 
-    fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
+    fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         range
-            .filter_map(|ix| {
-                let row = tree.rows.get(ix)?;
-                let folder = &tree.folders[row.folder as usize];
-                let entry = self.list_entry(folder, row.entry as usize, cx)?;
-                Some(self.list_row(ix, row.depth, folder, &entry, cx))
+            .filter_map(|ix| match tree.rows.get(ix)? {
+                Row::Header { label, count } => Some(group_header(ix, label, *count)),
+                Row::Item(row) => {
+                    let folder = &tree.folders[row.folder as usize];
+                    let entry = self.list_entry(folder, row.entry as usize, cx)?;
+                    Some(self.list_row(ix, row.depth, folder, &entry, cx).into_any_element())
+                }
             })
             .collect()
     }
@@ -150,10 +213,14 @@ impl Browser {
             .child(div().flex_none().w(px(theme::SIZE_WIDTH)).child(self.header_cell("サイズ", SortKey::Size, cx)))
             .child(div().flex_none().w(px(theme::KIND_WIDTH)).child(self.header_cell("種類", SortKey::Kind, cx)));
         // 1回の描画で何度も呼ばれるので、行の並びは1回だけ作る
-        let tree = Rc::new(self.tree(cx));
+        let tree = self.tree(cx);
         let count = tree.rows.len();
         div().flex().flex_col().flex_1().min_h_0().child(header).child(
-            div().flex_1().min_h_0().child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx)))
+                .child(
                 uniform_list(
                     "list-rows",
                     count,

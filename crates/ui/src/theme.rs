@@ -22,6 +22,8 @@ pub const DISCLOSURE_WIDTH: f32 = 14.0;
 pub const GRID_CELL_WIDTH: f32 = 120.0;
 pub const GRID_ROW_HEIGHT: f32 = 118.0;
 pub const GRID_ICON: f32 = 72.0;
+pub const GROUP_MENU_WIDTH: f32 = 150.0;
+pub const GROUP_MENU_RIGHT: f32 = 232.0;
 
 pub const BACKGROUND: u32 = 0xffffff;
 pub const BAR: u32 = 0xf6f6f7;
@@ -34,6 +36,7 @@ pub const STRIPE: u32 = 0xf4f5f7;
 pub const HOVER: u32 = 0xe4e6ea;
 pub const SELECTED: u32 = 0x0a64d8;
 pub const SELECTED_TEXT: u32 = 0xffffff;
+pub const SELECTED_INACTIVE: u32 = 0xd3d5da;
 pub const SEGMENT: u32 = 0xdfe1e5;
 pub const FOLDER: u32 = 0x4aa3e8;
 pub const FILE: u32 = 0xb8bbc1;
