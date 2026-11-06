@@ -6,7 +6,7 @@ pub const MAX_FIELD_WIDTH: f32 = 1200.0;
 pub const DEFAULT_COLUMN_WIDTH: f32 = 230.0;
 pub const MIN_ICON_SIZE: f32 = 32.0;
 pub const MAX_ICON_SIZE: f32 = 256.0;
-pub const DEFAULT_ICON_SIZE: f32 = 72.0;
+pub const DEFAULT_ICON_SIZE: f32 = 96.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewMode {
@@ -31,11 +31,24 @@ pub struct AppSettings {
     /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
     pub grid_selection_matches_hover: bool,
     pub drag_hover: DragHover,
-    /// ドラッグ中、最初のフォルダを開くまでの待ち時間（ミリ秒）
+    /// ドラッグで止まると開く時の、最初の待ち時間（ミリ秒）
     pub spring_first_ms: u64,
-    /// ドラッグ中、2回目以降に開くまでの待ち時間（ミリ秒）
+    /// ドラッグで止まると開く時の、2回目以降の待ち時間（ミリ秒）
     pub spring_next_ms: u64,
+    /// ドラッグで止まると小窓を出す時の待ち時間（ミリ秒）
+    pub spring_popup_ms: u64,
+    /// カラムの列を開くまでの待ち時間（ミリ秒）
+    pub spring_column_ms: u64,
     pub long_name: LongName,
+    pub scrollbar: ScrollbarMode,
+}
+
+/// スクロールバーの出し方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScrollbarMode {
+    /// スクロールしている間だけ出す
+    WhileScrolling,
+    Always,
 }
 
 /// アイコン表示で名前が収まらない時の見せ方。
@@ -47,13 +60,15 @@ pub enum LongName {
     Scroll,
 }
 
-/// 待ち時間の選択肢（ミリ秒）。
-pub const SPRING_CHOICES: [u64; 5] = [500, 1000, 1500, 2000, 3000];
+/// 待ち時間のスライダーの範囲（ミリ秒）。
+pub const MIN_SPRING_MS: u64 = 100;
+pub const MAX_SPRING_MS: u64 = 3000;
+const SPRING_STEP_MS: u64 = 100;
 
-/// 次の選択肢へ進める。最後の次は最初に戻る。
-pub fn next_spring_delay(current: u64) -> u64 {
-    let next = SPRING_CHOICES.iter().find(|&&choice| choice > current);
-    next.copied().unwrap_or(SPRING_CHOICES[0])
+/// スライダーの値を、範囲の中の100ミリ秒刻みへ丸める。
+pub fn snap_spring_ms(value: f32) -> u64 {
+    let snapped = (value / SPRING_STEP_MS as f32).round() as u64 * SPRING_STEP_MS;
+    snapped.clamp(MIN_SPRING_MS, MAX_SPRING_MS)
 }
 
 impl Default for AppSettings {
@@ -63,7 +78,10 @@ impl Default for AppSettings {
             drag_hover: DragHover::Open,
             spring_first_ms: 1000,
             spring_next_ms: 1500,
+            spring_popup_ms: 500,
+            spring_column_ms: 500,
             long_name: LongName::Fade,
+            scrollbar: ScrollbarMode::WhileScrolling,
         }
     }
 }
@@ -336,10 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn spring_delay_cycles_through_choices() {
-        assert_eq!(next_spring_delay(500), 1000);
-        assert_eq!(next_spring_delay(3000), 500);
-        assert_eq!(next_spring_delay(700), 1000);
+    fn spring_delay_snaps_to_steps_within_range() {
+        assert_eq!(snap_spring_ms(740.0), 700);
+        assert_eq!(snap_spring_ms(10.0), MIN_SPRING_MS);
+        assert_eq!(snap_spring_ms(9000.0), MAX_SPRING_MS);
     }
 
     #[test]

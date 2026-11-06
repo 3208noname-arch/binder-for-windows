@@ -3,7 +3,7 @@ use crate::icon_cache::{LARGE, SMALL};
 use crate::list_tree::{Flattened, Row};
 use crate::scrollbar::ScrollTarget;
 use crate::theme;
-use filer_core::{Entry, fit_width, format_size, kind_of};
+use filer_core::{Entry, fit_width, format_size, kind_of, text_width};
 use filer_shell::format_time;
 use gpui::{
     ClickEvent, Context, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, Point, UniformListScrollHandle, Window, div,
@@ -127,6 +127,7 @@ impl Browser {
         let pane = current.pane.clone();
         let (selected_background, selected_text) = self.selection_colors();
         let folder: PathBuf = pane.read(cx).state.path.clone();
+        let current_left = f32::from(current.scroll.0.borrow().base_handle.bounds().origin.x);
         range
             .filter_map(|ix| {
                 let row = match tree.rows.get(ix)? {
@@ -150,6 +151,7 @@ impl Browser {
                 let icon = self.icon(icon, is_dir, theme::ROW_ICON);
                 let name_element = self.name_or_input(&path, &entry);
                 let is_cut = self.is_cut(&path);
+                let label_text = entry.name.clone();
                 let row = div()
                     .id(ix)
                     .when(is_cut, |row| row.opacity(theme::CUT_OPACITY))
@@ -166,8 +168,10 @@ impl Browser {
                     .child(div().flex_1().min_w_0().overflow_hidden().child(name_element))
                     .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")));
                 let click_path = path.clone();
+                // 名前より右の余白のドラッグは範囲選択にする
+                let text_right = current_left + theme::ROW_ICON + theme::COLUMN_FIT_PADDING + text_width(&label_text, theme::TEXT_SIZE);
                 Some(
-                    self.item_mouse(row, path, is_dir, cx)
+                    self.item_mouse(row, path, is_dir, Some((current_left, text_right, Some(column))), cx)
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_column_item(column, click_path.clone(), name.clone(), entry.clone(), event, window, cx)
                         }))

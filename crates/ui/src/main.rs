@@ -8,6 +8,7 @@ mod list_state;
 mod list_tree;
 mod list_view;
 mod scrollbar;
+mod settings_view;
 mod size_cache;
 mod text_input;
 mod theme;
@@ -44,7 +45,7 @@ fn start_mode() -> Option<ViewMode> {
 }
 
 /// 保存先を開く。開けない時も、保存なしで動かす。
-fn open_store() -> Option<Store> {
+pub fn open_store() -> Option<Store> {
     let file = match std::env::var_os("FILER_SETTINGS") {
         Some(file) => PathBuf::from(file),
         None => PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("filer").join("settings.sqlite"),
@@ -74,7 +75,13 @@ fn main() {
         text_input::bind_keys(cx);
         let (mode, store) = (start_mode(), open_store());
         cx.open_window(options, move |window, cx| cx.new(|cx| Browser::new(path, mode, store, measure, window, cx))).unwrap();
-        cx.on_window_closed(|cx| cx.quit()).detach();
+        // 設定のウィンドウだけが残っても、本体を閉じたら終える
+        cx.on_window_closed(|cx| {
+            if !cx.windows().iter().any(|window| window.downcast::<Browser>().is_some()) {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
     });
 }

@@ -3,10 +3,11 @@ use crate::icon_cache::{HUGE, LARGE};
 use crate::scrollbar::ScrollTarget;
 use crate::list_tree::{Flattened, Row};
 use crate::theme;
-use filer_core::{Date, Entry, GroupKey, LongName, text_width};
+use crate::text_input::TextInput;
+use filer_core::{Date, Entry, GroupKey, LongName, MAX_ICON_SIZE, MIN_ICON_SIZE, text_width};
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, MouseButton, MouseDownEvent, Window, div, linear_color_stop,
-    linear_gradient, list, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, Context, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, Window, deferred,
+    div, linear_color_stop, linear_gradient, list, prelude::*, px, rgb,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -97,30 +98,46 @@ mod tests {
 }
 
 impl Browser {
+    /// 名前の編集欄。セルより広く取り、隣のセルの上に重ねて出す。
+    fn grid_rename(&self, entry: &Entry, cell_width: f32, input: Entity<TextInput>) -> AnyElement {
+        let wanted = text_width(&entry.name, theme::SMALL_TEXT_SIZE) + theme::RENAME_PADDING;
+        let width = wanted.clamp(cell_width, theme::RENAME_MAX_WIDTH);
+        div()
+            .relative()
+            .w_full()
+            .h(px(theme::GRID_LABEL_LINE + 4.))
+            .child(deferred(
+                div().absolute().top_0().left(px((cell_width - width) / 2.)).w(px(width)).child(input),
+            ))
+            .into_any_element()
+    }
+
     /// アイコンの下の名前。長い名前は折り返し、それでも収まらない分は設定に従う。
     fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, width: f32, selected: bool, background: u32, text: u32) -> AnyElement {
-        if self.renaming.as_ref().is_some_and(|renaming| renaming.path == path) {
-            return self.name_or_input(path, entry);
+        if let Some(renaming) = self.renaming.as_ref().filter(|renaming| renaming.path == path) {
+            return self.grid_rename(entry, width, renaming.input.clone());
         }
         let name = entry.name.clone();
-        let total = text_width(&name, theme::SMALL_TEXT_SIZE);
-        let overflowing = total > width * theme::GRID_LABEL_LINES;
+        let line = theme::GRID_LABEL_LINE;
+        let lines = (text_width(&name, theme::SMALL_TEXT_SIZE) / width).ceil();
+        let overflowing = lines > theme::GRID_LABEL_LINES;
         let base = div()
             .relative()
             .w_full()
-            .h(px(theme::GRID_LABEL_LINE * theme::GRID_LABEL_LINES))
             .overflow_hidden()
             .text_size(px(theme::SMALL_TEXT_SIZE))
-            .line_height(px(theme::GRID_LABEL_LINE))
+            .line_height(px(line))
+            .when(overflowing, |label| label.h(px(line * theme::GRID_LABEL_LINES)))
             .when(selected, |label| label.text_color(rgb(text)));
         let hovered = self.hovered_cell.as_deref() == Some(path);
         if overflowing && hovered && self.settings.long_name == LongName::Scroll {
-            let distance = total - width;
-            let seconds = (distance / theme::MARQUEE_SPEED).max(1.0);
-            let moving = div().whitespace_nowrap().child(name).with_animation(
+            // 折り返したまま縦に流す。名前は行で読むものなので、横には動かさない
+            let distance = (lines - theme::GRID_LABEL_LINES + 1.) * line;
+            let seconds = (distance / theme::MARQUEE_SPEED).max(1.0) + 1.0;
+            let moving = div().w_full().text_center().child(name).with_animation(
                 ("marquee", ix),
                 Animation::new(Duration::from_secs_f32(seconds)).repeat(),
-                move |line, progress| line.ml(px(-distance * progress)),
+                move |block, progress| block.mt(px(-distance * progress)),
             );
             return base.child(moving).into_any_element();
         }
@@ -128,7 +145,7 @@ impl Browser {
         let fade = linear_gradient(180., linear_color_stop(gpui::Rgba { a: 0., ..color }, 0.), linear_color_stop(color, 1.));
         base.child(div().w_full().text_center().child(name))
             .when(overflowing, |label| {
-                label.child(div().absolute().left_0().right_0().bottom_0().h(px(theme::GRID_LABEL_LINE)).bg(fade))
+                label.child(div().absolute().left_0().right_0().bottom_0().h(px(line)).bg(fade))
             })
             .into_any_element()
     }
@@ -144,7 +161,12 @@ impl Browser {
         let bucket = if size > LARGE as f32 { HUGE } else { LARGE };
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, bucket));
         let filled = selected && whole_cell;
-        let background = if filled { selected_background } else { theme::BACKGROUND };
+        let hovered = self.hovered_cell.as_deref() == Some(path.as_path());
+        let background = match (filled, selected, hovered) {
+            (true, _, _) => selected_background,
+            (false, true, _) | (false, false, true) => theme::HOVER,
+            _ => theme::BACKGROUND,
+        };
         let label_width = cell_width - theme::GRID_LABEL_PADDING;
         let label = self.grid_label(ix, &path, entry, label_width, selected, background, selected_text);
         let label_path = path.clone();
@@ -175,7 +197,7 @@ impl Browser {
             .child(self.icon(icon, is_dir, size))
             .child(label);
         let click_path = path.clone();
-        self.item_mouse(cell, path, is_dir, cx)
+        self.item_mouse(cell, path, is_dir, None, cx)
             .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
@@ -193,7 +215,16 @@ impl Browser {
                 };
                 let cells: Vec<_> = entries.iter().map(|(ix, entry)| self.grid_cell(*ix, &folder, entry, cx)).collect();
                 let (_, row_height) = grid_metrics(self.view.icon_size);
-                div().id(index).flex().w_full().h(px(row_height)).px(px(theme::GRID_SIDE_PADDING)).children(cells).into_any_element()
+                div()
+                    .id(index)
+                    .flex()
+                    .items_start()
+                    .gap(px(theme::GRID_CELL_GAP))
+                    .w_full()
+                    .h(px(row_height))
+                    .px(px(theme::GRID_SIDE_PADDING))
+                    .children(cells)
+                    .into_any_element()
             }
             None => div().into_any_element(),
         }
@@ -228,7 +259,7 @@ impl Browser {
     pub fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let width: f32 = (window.viewport_size().width - px(theme::SIDEBAR_WIDTH + theme::GRID_SIDE_PADDING * 2.)).into();
         let (cell_width, _) = grid_metrics(self.view.icon_size);
-        let per_row = ((width / cell_width) as usize).max(1);
+        let per_row = ((width / (cell_width + theme::GRID_CELL_GAP)) as usize).max(1);
         self.grid_per_row = per_row;
         self.refresh_grid(per_row, cx);
         let bar = self.scrollbar("grid-bar", ScrollTarget::Grid, true, 0., cx);
@@ -236,6 +267,13 @@ impl Browser {
             .relative()
             .flex_1()
             .min_h_0()
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                if event.modifiers.control {
+                    let notches = f32::from(event.delta.pixel_delta(px(theme::ROW_HEIGHT)).y).signum();
+                    let size = (this.view.icon_size + notches * theme::ICON_SIZE_STEP).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
+                    this.update_view(cx, |view| view.icon_size = size);
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
                 if !event.modifiers.control {

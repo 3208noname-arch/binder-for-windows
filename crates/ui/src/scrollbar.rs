@@ -97,6 +97,9 @@ impl Browser {
 
     /// つまみを描く。親の要素は `relative` で、`inset` はつまみの動く範囲の始まり。
     pub fn scrollbar(&self, id: &'static str, target: ScrollTarget, vertical: bool, inset: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.bars_visible() {
+            return None;
+        }
         let metrics = self.scroll_metrics(target, vertical)?;
         let (length, position) = metrics.thumb()?;
         let scale = metrics.scale();

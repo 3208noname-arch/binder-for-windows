@@ -2,7 +2,7 @@
 
 use filer_shell::place_ime_caret;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
     UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, white,
@@ -54,6 +54,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// 長い名前の時に、文字カーソルが見えるよう左へずらす量
+    shift: Pixels,
 }
 
 impl TextInput {
@@ -69,6 +71,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            shift: px(0.),
         }
     }
 
@@ -210,7 +213,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.shift)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -416,6 +419,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    shift: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -513,12 +517,14 @@ impl Element for TextElement {
             .shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
+        let shift = (cursor_pos + px(2.) - bounds.size.width).max(px(0.));
+        let left = bounds.left() - shift;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(left + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
                     gpui::blue(),
@@ -529,11 +535,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            left + line.x_for_index(selected_range.start),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            left + line.x_for_index(selected_range.end),
                             bounds.bottom(),
                         ),
                     ),
@@ -546,6 +552,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            shift,
         }
     }
 
@@ -565,12 +572,18 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
+        let shift = prepaint.shift;
+        // 欄からはみ出た文字は描かない
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            let origin = point(bounds.left() - shift, bounds.top());
+            if let Some(line) = &prepaint.line {
+                line.paint(origin, window.line_height(), window, cx).unwrap();
+            }
+        });
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
@@ -588,6 +601,7 @@ impl Element for TextElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.shift = shift;
         });
     }
 }

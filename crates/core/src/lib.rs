@@ -13,6 +13,7 @@ pub use history::History;
 pub use selection::Selection;
 pub use view::{
     AppSettings, DEFAULT_COLUMN_WIDTH, DEFAULT_ICON_SIZE, DragHover, Field, FolderView, ListColumn, LongName, MAX_FIELD_WIDTH,
-    MAX_ICON_SIZE, MIN_FIELD_WIDTH, MIN_ICON_SIZE, ViewMode, fit_width, next_spring_delay, rows_in_band, text_width,
+    MAX_ICON_SIZE, MAX_SPRING_MS, MIN_FIELD_WIDTH, MIN_ICON_SIZE, MIN_SPRING_MS, ScrollbarMode, ViewMode, fit_width, rows_in_band,
+    snap_spring_ms, text_width,
 };
 pub use sort::{NameCmp, SortKey, SortOrder, insert_sorted, sort_entries};

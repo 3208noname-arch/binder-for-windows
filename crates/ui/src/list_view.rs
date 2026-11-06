@@ -243,6 +243,19 @@ impl Browser {
             )
     }
 
+    /// リストの名前の列の横の範囲。Explorerと同じく、その外のドラッグは範囲選択にする。
+    fn name_span(&self, depth: u32) -> Option<(f32, f32, Option<usize>)> {
+        let origin: f32 = self.list_scroll.0.borrow().base_handle.bounds().origin.x.into();
+        let mut left = origin + theme::ROW_SIDE_PADDING;
+        for column in &self.view.columns {
+            if column.field == Field::Name {
+                return Some((left + depth as f32 * theme::INDENT, left + column.width, None));
+            }
+            left += column.width + theme::FIELD_GAP;
+        }
+        None
+    }
+
     /// 名前の表示。編集中なら入力欄を出す。
     pub fn name_or_input(&self, path: &Path, entry: &Entry) -> AnyElement {
         match &self.renaming {
@@ -323,7 +336,8 @@ impl Browser {
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
             .children(cells);
         let click_path = path.clone();
-        self.item_mouse(row, path, is_dir, cx)
+        let name_span = self.name_span(depth);
+        self.item_mouse(row, path, is_dir, name_span, cx)
             .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
@@ -374,6 +388,7 @@ impl Browser {
                 if !event.modifiers.control {
                     this.clear_selection(cx);
                 }
+                this.suppress_click = false;
                 this.begin_band(event.position, None, event.modifiers.control, cx);
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.folder_menu(cx)))

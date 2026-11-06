@@ -1,5 +1,6 @@
 use crate::actions::{Band, DragPopup, Renaming, RowPress, Spring, SpringTarget};
 use crate::scrollbar::{IconSizeDrag, ScrollDrag, ScrollTarget};
+use crate::settings_view::{SettingsModel, SettingsView};
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::icons_view::GridData;
@@ -7,14 +8,14 @@ use crate::list_tree::Flattened;
 use crate::size_cache::SizeCache;
 use crate::theme;
 use filer_core::{
-    AppSettings, Date, DragHover, Entry, Field, FolderView, GroupKey, History, LongName, Selection, SortKey, SortOrder,
-    ViewMode, next_spring_delay,
+    AppSettings, Date, Entry, Field, FolderView, GroupKey, History, ScrollbarMode, Selection, SortKey, SortOrder, ViewMode,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState, MouseButton,
-    MouseMoveEvent, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb,
+    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState,
+    MouseButton, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::{HashMap, HashSet};
@@ -22,7 +23,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct Column {
     pub pane: Entity<FolderPane>,
@@ -52,7 +53,6 @@ pub enum Menu {
     Sort,
     Group,
     Fields(Point<Pixels>),
-    Settings,
 }
 
 /// 行の並びが古くなっていないかを判断する材料。
@@ -91,6 +91,17 @@ pub struct Browser {
     pub resizing: Option<Resize>,
     pub header_drag: Option<HeaderDrag>,
     pub settings: AppSettings,
+    pub settings_model: Entity<SettingsModel>,
+    settings_window: Option<WindowHandle<SettingsView>>,
+    pub soft_selection: bool,
+    pub suppress_click: bool,
+    pub band_task: Option<Task<()>>,
+    pub scale: f32,
+    pub viewport: Size<Pixels>,
+    scroll_signature: f32,
+    pub bars_until: Option<Instant>,
+    bars_task: Option<Task<()>>,
+    drag_seen: bool,
     pub cut: HashSet<PathBuf>,
     pub spring: Option<Spring>,
     pub springs_done: u32,
@@ -126,6 +137,12 @@ impl Browser {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let settings = store.as_ref().map(Store::app_settings).unwrap_or_default();
+        let settings_model = cx.new(|_| SettingsModel { value: settings.clone() });
+        cx.observe(&settings_model, |this, model, cx| {
+            this.settings = model.read(cx).value.clone();
+            cx.notify();
+        })
+        .detach();
         let mut view = FolderView::for_folder(saved_view(&store, &path), ViewMode::List);
         if let Some(mode) = mode {
             view.mode = mode;
@@ -169,6 +186,17 @@ impl Browser {
             resizing: None,
             header_drag: None,
             settings,
+            settings_model,
+            settings_window: None,
+            soft_selection: false,
+            suppress_click: false,
+            band_task: None,
+            scale: window.scale_factor(),
+            viewport: window.viewport_size(),
+            scroll_signature: 0.,
+            bars_until: None,
+            bars_task: None,
+            drag_seen: false,
             cut: HashSet::new(),
             spring: None,
             springs_done: 0,
@@ -218,12 +246,48 @@ impl Browser {
         .detach();
     }
 
-    fn save_settings(&self) {
-        if let Some(store) = &self.store
-            && let Err(error) = store.save_app_settings(&self.settings)
+    /// 設定のウィンドウを開く。開いていれば前に出す。
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(window) = self.settings_window
+            && window.update(cx, |_, window, _| window.activate_window()).is_ok()
         {
-            eprintln!("設定を保存できませんでした: {error}");
+            return;
         }
+        let model = self.settings_model.clone();
+        let bounds = Bounds::centered(None, size(px(theme::SETTINGS_WINDOW_WIDTH), px(theme::SETTINGS_WINDOW_HEIGHT)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions { title: Some("設定".into()), ..Default::default() }),
+            ..Default::default()
+        };
+        self.settings_window = cx.open_window(options, move |_, cx| cx.new(|cx| SettingsView::new(model, cx))).ok();
+    }
+
+    /// スクロールされたかを見て、スクロールバーを出す時間を延ばす。
+    fn watch_scroll(&mut self, cx: &mut Context<Self>) {
+        let columns: f32 = self.columns.iter().map(|column| f32::from(column.scroll.0.borrow().base_handle.offset().y)).sum();
+        let signature = f32::from(self.list_scroll.0.borrow().base_handle.offset().y)
+            + f32::from(self.list_columns_scroll.offset().x) * 3.
+            + f32::from(self.grid_list.scroll_px_offset_for_scrollbar().y) * 5.
+            + f32::from(self.columns_scroll.offset().x) * 7.
+            + f32::from(self.sidebar_scroll.offset().y) * 11.
+            + columns * 13.;
+        if signature != self.scroll_signature {
+            self.scroll_signature = signature;
+            let linger = Duration::from_millis(theme::SCROLLBAR_LINGER_MS);
+            self.bars_until = Some(Instant::now() + linger);
+            self.bars_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(linger).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }));
+        }
+    }
+
+    /// 今スクロールバーを出すか。
+    pub fn bars_visible(&self) -> bool {
+        self.settings.scrollbar == ScrollbarMode::Always
+            || self.scroll_drag.is_some()
+            || self.bars_until.is_some_and(|until| Instant::now() < until)
     }
 
     pub fn new_pane(&self, path: PathBuf, order: SortOrder, wants: bool, cx: &mut Context<Self>) -> Entity<FolderPane> {
@@ -361,7 +425,9 @@ impl Browser {
 
     /// 選択の色。別のウィンドウへ移った時は灰色にする。
     pub fn selection_colors(&self) -> (u32, u32) {
-        if self.window_active {
+        if self.soft_selection {
+            (theme::SELECTED_SOFT, theme::TEXT)
+        } else if self.window_active {
             (theme::SELECTED, theme::SELECTED_TEXT)
         } else {
             (theme::SELECTED_INACTIVE, theme::TEXT)
@@ -387,9 +453,6 @@ impl Browser {
         if event.pressed_button != Some(MouseButton::Left) {
             self.press = None;
             self.scroll_drag = None;
-            if self.band.take().is_some() {
-                cx.notify();
-            }
             if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
                 self.save_active_view(cx);
             }
@@ -402,8 +465,6 @@ impl Browser {
             self.drag_scroll(event, cx);
         } else if self.icon_size_drag.is_some() {
             self.drag_icon_size(event, cx);
-        } else if self.band.is_some() {
-            self.drag_band(event, cx);
         } else if self.resizing.is_some() {
             self.drag_resize(event, cx);
         } else if self.header_drag.is_some() {
@@ -415,7 +476,8 @@ impl Browser {
         self.end_press();
         self.end_spring();
         self.scroll_drag = None;
-        if self.band.take().is_some() {
+        if self.drag_seen {
+            self.drag_seen = false;
             cx.notify();
         }
         if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
@@ -557,64 +619,6 @@ impl Browser {
             .collect()
     }
 
-    fn settings_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let seconds = |ms: u64| format!("{:.1} 秒", ms as f32 / 1000.);
-        let hover = self.settings.drag_hover;
-        let choice = |id: &'static str, label: &str, value: DragHover, cx: &mut Context<Self>| {
-            Self::menu_item(id.into(), label.into(), hover == value)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.drag_hover = value;
-                    this.save_settings();
-                    this.menu = None;
-                    cx.notify();
-                }))
-                .into_any_element()
-        };
-        let whole_cell = self.settings.grid_selection_matches_hover;
-        vec![
-            choice("hover-open", "ドラッグで止まると開く", DragHover::Open, cx),
-            choice("hover-popup", "ドラッグで止まると小窓", DragHover::Popup, cx),
-            Self::menu_item("spring-first".into(), format!("最初に開くまで: {}", seconds(self.settings.spring_first_ms)), false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.spring_first_ms = next_spring_delay(this.settings.spring_first_ms);
-                    this.save_settings();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            Self::menu_item("spring-next".into(), format!("次に開くまで: {}", seconds(self.settings.spring_next_ms)), false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.spring_next_ms = next_spring_delay(this.settings.spring_next_ms);
-                    this.save_settings();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            div().my_1().h(px(1.)).bg(rgb(theme::LINE)).into_any_element(),
-            Self::menu_item("long-fade".into(), "長い名前を薄く消す".into(), self.settings.long_name == LongName::Fade)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.long_name = LongName::Fade;
-                    this.save_settings();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            Self::menu_item("long-scroll".into(), "長い名前を流して見せる".into(), self.settings.long_name == LongName::Scroll)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.long_name = LongName::Scroll;
-                    this.save_settings();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            div().my_1().h(px(1.)).bg(rgb(theme::LINE)).into_any_element(),
-            Self::menu_item("whole-cell".into(), "アイコンの選択を全体で示す".into(), whole_cell)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.grid_selection_matches_hover = !this.settings.grid_selection_matches_hover;
-                    this.save_settings();
-                    this.menu = None;
-                    cx.notify();
-                }))
-                .into_any_element(),
-        ]
-    }
-
     fn open_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let top = px(theme::TOOLBAR_HEIGHT);
         Some(match self.menu? {
@@ -625,10 +629,6 @@ impl Browser {
             Menu::Group => {
                 let items = self.group_menu(cx);
                 Self::popup(|d| d.top(top).right(px(theme::GROUP_MENU_RIGHT)), items).into_any_element()
-            }
-            Menu::Settings => {
-                let items = self.settings_menu(cx);
-                Self::popup(|d| d.top(top).right(px(theme::MENU_RIGHT_SETTINGS)), items).into_any_element()
             }
             Menu::Fields(position) => {
                 let items = self.fields_menu(cx);
@@ -695,7 +695,11 @@ impl Browser {
                     .child(self.segment("mode-list", "リスト", ViewMode::List, cx))
                     .child(self.segment("mode-icons", "アイコン", ViewMode::Icons, cx)),
             )
-            .child(self.menu_button("settings", "設定 ▾".to_string(), Menu::Settings, cx))
+            .child(
+                Self::tool_button("settings", "設定", true)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+            )
     }
 
     fn sidebar_item(&self, id: String, label: String, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -822,6 +826,9 @@ fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_active = window.is_window_active();
+        self.scale = window.scale_factor();
+        self.viewport = window.viewport_size();
+        self.watch_scroll(cx);
         self.sync_with_listing(window, cx);
         if let Some(path) = self.rename_request.take() {
             self.begin_rename(path, window, cx);
@@ -846,6 +853,7 @@ impl Render for Browser {
         let menu = self.open_menu(cx);
         let drag_popups = self.drag_popup_views(cx);
         let band = self.band_view();
+        let drag_bar = cx.has_active_drag().then(|| self.drag_bar(cx));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
         gpui::set_drop_volume(&volume_of(self.history.current()));
         div()
@@ -875,12 +883,16 @@ impl Render for Browser {
                 }),
             )
             .child(toolbar)
-            .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                this.keep_popups(event.event.position, cx);
+            .on_drag_move::<ExternalPaths>(cx.listener(|this, _: &DragMoveEvent<ExternalPaths>, _, cx| {
+                if !this.drag_seen {
+                    this.drag_seen = true;
+                    cx.notify();
+                }
             }))
             .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
             .child(status)
             .children(band)
+            .children(drag_bar)
             .children(menu)
             .children(drag_popups)
     }

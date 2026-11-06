@@ -2410,7 +2410,8 @@ impl Interactivity {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
-            let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
+            // filer: 横の入力を縦に読み替えると、横にスクロールした時に斜めに動く
+            let restrict_scroll_to_axis = true;
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
