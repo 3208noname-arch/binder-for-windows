@@ -8,13 +8,14 @@ pub struct ListState {
     pub entries: Vec<Entry>,
     pub order: SortOrder,
     pub error: Option<String>,
+    pub loading: bool,
     pub generation: u64,
 }
 
 impl ListState {
     pub fn new(path: PathBuf) -> Self {
         let order = SortOrder { key: SortKey::Name, descending: false };
-        Self { path, entries: Vec::new(), order, error: None, generation: 0 }
+        Self { path, entries: Vec::new(), order, error: None, loading: false, generation: 0 }
     }
 
     /// 別のフォルダへ移る。返した世代より古い列挙の結果は `apply` で捨てる。
@@ -22,6 +23,7 @@ impl ListState {
         self.path = path;
         self.entries.clear();
         self.error = None;
+        self.loading = true;
         self.generation += 1;
         self.generation
     }
@@ -32,8 +34,11 @@ impl ListState {
         }
         match event {
             ListEvent::Batch(batch) => insert_sorted(&mut self.entries, batch, self.order, compare_names),
-            ListEvent::Done => {}
-            ListEvent::Failed(message) => self.error = Some(message),
+            ListEvent::Done => self.loading = false,
+            ListEvent::Failed(message) => {
+                self.loading = false;
+                self.error = Some(message);
+            }
         }
     }
 
@@ -66,6 +71,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loading_lasts_until_listing_ends() {
+        let mut s = ListState::new("a".into());
+        let g = s.open("a".into());
+        assert!(s.loading);
+        s.apply(g, ListEvent::Batch(vec![file("x")]));
+        assert!(s.loading);
+        s.apply(g, ListEvent::Done);
+        assert!(!s.loading);
+        let g = s.open("b".into());
+        s.apply(g, ListEvent::Failed("no".into()));
+        assert!(!s.loading);
+    }
+
+    #[test]
     fn coalesce_joins_batches_before_final_event() {
         let events = vec![
             ListEvent::Batch(vec![file("a")]),
@@ -82,7 +101,7 @@ mod tests {
     }
 
     fn file(name: &str) -> Entry {
-        Entry { name: name.into(), is_dir: false, size: 0, modified: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, size: 0, modified: 0 }
     }
     fn names(state: &ListState) -> Vec<&str> {
         state.entries.iter().map(|e| e.name.as_str()).collect()

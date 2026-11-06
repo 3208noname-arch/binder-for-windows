@@ -7,13 +7,14 @@ use gpui::{
     ClickEvent, Context, CursorStyle, Div, Stateful, Task, UniformListScrollHandle, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
+use std::ffi::OsString;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub struct ListView {
     state: ListState,
-    selected: Option<String>,
+    selected: Option<OsString>,
     scroll: UniformListScrollHandle,
     job: Option<ListJob>,
     loader: Option<Task<()>>,
@@ -122,14 +123,14 @@ impl ListView {
         cx.notify();
     }
 
-    fn click_row(&mut self, ix: usize, event: &ClickEvent, cx: &mut Context<Self>) {
-        let Some(entry) = self.state.entries.get(ix) else { return };
-        if event.click_count() == 2 && entry.is_dir {
-            let path = self.state.path.join(&entry.name);
+    /// 列挙の途中でも行の位置は動くので、番号ではなく名前で受ける。
+    fn click_row(&mut self, name: OsString, is_dir: bool, event: &ClickEvent, cx: &mut Context<Self>) {
+        if event.click_count() == 2 && is_dir {
+            let path = self.state.path.join(&name);
             self.open(path, cx);
             return;
         }
-        self.selected = Some(entry.name.clone());
+        self.selected = Some(name);
         cx.notify();
     }
 
@@ -148,7 +149,8 @@ impl ListView {
     }
 
     fn row(&self, ix: usize, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let selected = self.selected.as_deref() == Some(entry.name.as_str());
+        let selected = self.selected.as_deref() == Some(entry.os_name());
+        let (name, is_dir) = (entry.os_name().to_os_string(), entry.is_dir);
         let background = match (selected, ix % 2 == 1) {
             (true, _) => theme::SELECTED,
             (false, true) => theme::STRIPE,
@@ -169,7 +171,7 @@ impl ListView {
             .bg(rgb(background))
             .text_color(rgb(text))
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
-            .on_click(cx.listener(move |this, event, _, cx| this.click_row(ix, event, cx)))
+            .on_click(cx.listener(move |this, event, _, cx| this.click_row(name.clone(), is_dir, event, cx)))
             .child(div().flex_none().size(px(14.)).rounded_sm().bg(rgb(icon)))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()))
             .child(div().flex_none().w(px(theme::DATE_WIDTH)).text_color(rgb(sub_text)).child(format_time(entry.modified)))
@@ -260,7 +262,10 @@ impl Render for ListView {
             .border_t_1()
             .border_color(rgb(theme::LINE))
             .text_color(rgb(theme::SUB_TEXT))
-            .child(format!("{} 項目", self.state.entries.len()))
+            .child(match self.state.loading {
+                true => format!("読み込み中… {} 項目", self.state.entries.len()),
+                false => format!("{} 項目", self.state.entries.len()),
+            })
             .child(self.state.path.display().to_string());
         div()
             .flex()

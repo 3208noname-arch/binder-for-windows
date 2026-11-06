@@ -4,6 +4,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
@@ -12,8 +13,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::PCWSTR;
 
 const BATCH_SIZE: usize = 2000;
-/// これより長いパスに `\\?\` を付ける。MAX_PATHより少し手前にしている。
-const LONG_PATH_LEN: usize = 240;
+const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
 pub enum ListEvent {
     Batch(Vec<Entry>),
@@ -73,6 +73,7 @@ fn enumerate(
     };
 
     let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut last_flush = Instant::now();
     let result = loop {
         if cancelled.load(Ordering::Relaxed) {
             break Ok(());
@@ -80,9 +81,10 @@ fn enumerate(
         if let Some(entry) = to_entry(&data) {
             batch.push(entry);
         }
-        if batch.len() == BATCH_SIZE {
+        if should_flush(batch.len(), last_flush.elapsed()) {
             let full = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_SIZE));
             on_event(ListEvent::Batch(full));
+            last_flush = Instant::now();
         }
         match unsafe { FindNextFileW(handle, &mut data) } {
             Ok(()) => {}
@@ -99,27 +101,42 @@ fn enumerate(
 
 fn to_entry(data: &WIN32_FIND_DATAW) -> Option<Entry> {
     let len = data.cFileName.iter().position(|&c| c == 0).unwrap_or(data.cFileName.len());
-    let name = OsString::from_wide(&data.cFileName[..len]).to_string_lossy().into_owned();
+    let (name, raw_name) = match OsString::from_wide(&data.cFileName[..len]).into_string() {
+        Ok(name) => (name, None),
+        Err(raw) => (raw.to_string_lossy().into_owned(), Some(raw)),
+    };
     if name == "." || name == ".." {
         return None;
     }
     let time = data.ftLastWriteTime;
     Some(Entry {
         name,
+        raw_name,
         is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
         size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
         modified: (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime),
     })
 }
 
-/// MAX_PATHを超えるパスに `\\?\` を付ける。
+/// 絶対パスに `\\?\` を付ける。長いパスに加えて、末尾がドットの名前も正しく開くため。
 pub fn long_path(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    if text.len() < LONG_PATH_LEN || text.starts_with(r"\\?\") {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const SLASH: u16 = b'/' as u16;
+    if !path.is_absolute() {
         return path.to_path_buf();
     }
-    match text.strip_prefix(r"\\") {
-        Some(share) => format!(r"\\?\UNC\{share}").into(),
-        None => format!(r"\\?\{text}").into(),
+    let wide: Vec<u16> =
+        path.as_os_str().encode_wide().map(|c| if c == SLASH { BACKSLASH } else { c }).collect();
+    let starts = |text: &str| wide.starts_with(&text.encode_utf16().collect::<Vec<_>>());
+    if starts(r"\\?\") || starts(r"\\.\") {
+        return path.to_path_buf();
     }
+    let (prefix, rest) = if starts(r"\\") { (r"\\?\UNC\", &wide[2..]) } else { (r"\\?\", &wide[..]) };
+    let full: Vec<u16> = prefix.encode_utf16().chain(rest.iter().copied()).collect();
+    OsString::from_wide(&full).into()
+}
+
+/// 溜まった項目を画面へ渡す時か。遅いNASでも、届いた分を早く見せる。
+pub fn should_flush(len: usize, since_last: Duration) -> bool {
+    len >= BATCH_SIZE || (len > 0 && since_last >= FLUSH_INTERVAL)
 }

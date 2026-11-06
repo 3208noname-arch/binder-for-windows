@@ -1,5 +1,6 @@
-use filer_shell::{ListEvent, compare_names, long_path, start_list};
+use filer_shell::{ListEvent, compare_names, long_path, should_flush, start_list};
 use std::cmp::Ordering;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel, sync_channel};
 use std::time::Duration;
@@ -125,10 +126,57 @@ fn lists_path_over_260_chars() {
 }
 
 #[test]
-fn long_path_keeps_short_paths_and_handles_unc() {
-    assert_eq!(long_path(Path::new(r"C:\a")), Path::new(r"C:\a"));
-    let share = format!(r"\\nas\share\{}", "x".repeat(300));
-    assert_eq!(long_path(Path::new(&share)), PathBuf::from(format!(r"\\?\UNC\nas\share\{}", "x".repeat(300))));
+fn long_path_prefixes_absolute_paths() {
+    assert_eq!(long_path(Path::new(r"C:\a")), Path::new(r"\\?\C:\a"));
+    assert_eq!(long_path(Path::new("C:/a/b")), Path::new(r"\\?\C:\a\b"));
+    assert_eq!(long_path(Path::new(r"\\nas\share")), Path::new(r"\\?\UNC\nas\share"));
+    assert_eq!(long_path(Path::new(r"\\?\C:\a")), Path::new(r"\\?\C:\a"));
+    assert_eq!(long_path(Path::new("relative")), Path::new("relative"));
+}
+
+#[test]
+fn lists_folder_whose_name_ends_with_dot() {
+    let dir = tempfile::tempdir().unwrap();
+    let dotted = dir.path().join("foo.");
+    std::fs::create_dir(long_path(&dotted)).unwrap();
+    std::fs::create_dir(dir.path().join("foo")).unwrap();
+    std::fs::write(dir.path().join("foo").join("wrong.txt"), "").unwrap();
+    std::fs::write(long_path(&dotted.join("right.txt")), "").unwrap();
+    let (_job, rx) = listen(dotted);
+    let (names, _, error) = collect(rx);
+    assert_eq!(error, None);
+    assert_eq!(names, ["right.txt"]);
+}
+
+#[test]
+fn opens_folder_with_lone_surrogate_name() {
+    use std::os::windows::ffi::OsStringExt;
+    let dir = tempfile::tempdir().unwrap();
+    let name = OsString::from_wide(&[0x61, 0xD800]);
+    std::fs::create_dir(dir.path().join(&name)).unwrap();
+    std::fs::write(dir.path().join(&name).join("inner.txt"), "").unwrap();
+    let (_job, rx) = listen(dir.path().into());
+    let mut entries = Vec::new();
+    loop {
+        match rx.recv_timeout(WAIT).unwrap() {
+            ListEvent::Batch(b) => entries.extend(b),
+            ListEvent::Done => break,
+            ListEvent::Failed(m) => panic!("{m}"),
+        }
+    }
+    assert_eq!(entries[0].os_name(), name.as_os_str());
+    let (_job, rx) = listen(dir.path().join(entries[0].os_name()));
+    let (names, _, error) = collect(rx);
+    assert_eq!(error, None);
+    assert_eq!(names, ["inner.txt"]);
+}
+
+#[test]
+fn flushes_when_batch_is_full_or_entries_are_slow() {
+    assert!(!should_flush(0, Duration::from_secs(5)));
+    assert!(!should_flush(10, Duration::from_millis(50)));
+    assert!(should_flush(10, Duration::from_millis(100)));
+    assert!(should_flush(2000, Duration::ZERO));
 }
 
 #[test]

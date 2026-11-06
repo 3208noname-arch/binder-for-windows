@@ -1,7 +1,12 @@
+use std::ffi::{OsStr, OsString};
+
 /// フォルダの中の1項目。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
+    /// 表示用の名前
     pub name: String,
+    /// `name` へ変換すると壊れる名前の時だけ持つ、元の名前
+    pub raw_name: Option<OsString>,
     pub is_dir: bool,
     pub size: u64,
     /// 更新日時（FILETIME、1601年からの100ナノ秒）
@@ -9,6 +14,11 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// パスの組み立てと項目の区別に使う、元の名前。
+    pub fn os_name(&self) -> &OsStr {
+        self.raw_name.as_deref().unwrap_or(OsStr::new(&self.name))
+    }
+
     /// 拡張子。無ければ空文字列。先頭のドットだけの名前は拡張子と見なさない。
     pub(crate) fn extension(&self) -> &str {
         match self.name.rfind('.') {

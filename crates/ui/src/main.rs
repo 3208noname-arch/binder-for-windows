@@ -8,17 +8,18 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn start_path() -> PathBuf {
-    std::env::args()
+    let path: PathBuf = std::env::args_os()
         .skip(1)
-        .find(|arg| !arg.starts_with("--"))
-        .or_else(|| std::env::var("USERPROFILE").ok())
+        .find(|arg| !arg.to_string_lossy().starts_with("--"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .unwrap_or_else(|| "C:\\".into())
-        .into()
+        .into();
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 fn main() {
     let start = Instant::now();
-    let measure = std::env::args().any(|arg| arg == "--measure");
+    let measure = std::env::args_os().any(|arg| arg == "--measure");
     let path = start_path();
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
