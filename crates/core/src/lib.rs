@@ -3,5 +3,5 @@
 mod entry;
 mod sort;
 
-pub use entry::{Entry, kind_of};
+pub use entry::{Entry, format_size, kind_of};
 pub use sort::{NameCmp, SortKey, SortOrder, insert_sorted, sort_entries};

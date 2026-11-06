@@ -18,6 +18,21 @@ impl Entry {
     }
 }
 
+/// サイズの列に出す文字列。Finderに合わせて1000単位で表す。
+pub fn format_size(size: u64) -> String {
+    if size < 1000 {
+        return format!("{size} B");
+    }
+    let mut value = size as f64 / 1000.0;
+    for unit in ["KB", "MB", "GB"] {
+        if value < 1000.0 {
+            return format!("{value:.1} {unit}");
+        }
+        value /= 1000.0;
+    }
+    format!("{value:.1} TB")
+}
+
 /// 種類の列に出す文字列。ファイルは拡張子を小文字にしたもの。
 pub fn kind_of(entry: &Entry) -> String {
     if entry.is_dir {
@@ -26,5 +41,19 @@ pub fn kind_of(entry: &Entry) -> String {
     match entry.extension() {
         "" => "ファイル".into(),
         ext => ext.to_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_size;
+
+    #[test]
+    fn formats_size_in_units_of_1000() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(999), "999 B");
+        assert_eq!(format_size(1_500), "1.5 KB");
+        assert_eq!(format_size(212_000_000), "212.0 MB");
+        assert_eq!(format_size(1_200_000_000), "1.2 GB");
     }
 }

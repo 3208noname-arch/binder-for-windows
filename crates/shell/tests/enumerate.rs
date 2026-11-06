@@ -132,6 +132,15 @@ fn long_path_keeps_short_paths_and_handles_unc() {
 }
 
 #[test]
+fn format_time_is_local_year_to_minute() {
+    // 2026-07-01 00:00 UTC。どのタイムゾーンでも2026年の6月か7月になる
+    let text = filer_shell::format_time(134_273_376_000_000_000);
+    assert_eq!(text.len(), 16, "{text}");
+    assert!(text.starts_with("2026/0"), "{text}");
+    assert_eq!(filer_shell::format_time(0), "");
+}
+
+#[test]
 fn compare_names_is_numeric() {
     assert_eq!(compare_names("a2", "a10"), Ordering::Less);
     assert_eq!(compare_names("B", "a"), Ordering::Greater);
