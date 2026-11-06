@@ -8,6 +8,8 @@ pub struct Entry {
     /// `name` へ変換すると壊れる名前の時だけ持つ、元の名前
     pub raw_name: Option<OsString>,
     pub is_dir: bool,
+    /// ジャンクションやシンボリックリンク
+    pub is_link: bool,
     pub size: u64,
     /// 更新日時（FILETIME、1601年からの100ナノ秒）
     pub modified: i64,

@@ -1,10 +1,87 @@
 use crate::browser::Browser;
 use crate::icon_cache::LARGE;
+use crate::list_tree::{Flattened, Row};
+use crate::list_view::group_header;
 use crate::theme;
-use filer_core::Entry;
-use gpui::{ClickEvent, Context, MouseButton, Window, div, prelude::*, px, rgb, uniform_list};
-use std::ops::Range;
-use std::path::PathBuf;
+use filer_core::{Date, Entry, GroupKey};
+use gpui::{AnyElement, ClickEvent, Context, MouseButton, Window, div, list, prelude::*, px, rgb};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+/// アイコン表示の行の並びと、それを作った時の条件。
+pub struct GridData {
+    version: u64,
+    group: GroupKey,
+    per_row: usize,
+    today: Date,
+    rows: Rc<Vec<GridRow>>,
+}
+
+/// アイコン表示の1行。見出しか、並べるセルの番号。
+pub enum GridRow {
+    Header { label: String, count: usize },
+    Cells(Vec<u32>),
+}
+
+/// 行の並びを、横に `per_row` 個ずつのセルへ畳む。
+pub fn grid_rows_of(tree: &Flattened, per_row: usize) -> Vec<GridRow> {
+    let mut rows = Vec::new();
+    let mut cells = Vec::new();
+    for row in &tree.rows {
+        match row {
+            Row::Header { label, count } => {
+                if !cells.is_empty() {
+                    rows.push(GridRow::Cells(std::mem::take(&mut cells)));
+                }
+                rows.push(GridRow::Header { label: label.clone(), count: *count });
+            }
+            Row::Item(item) => {
+                cells.push(item.entry);
+                if cells.len() == per_row {
+                    rows.push(GridRow::Cells(std::mem::take(&mut cells)));
+                }
+            }
+        }
+    }
+    if !cells.is_empty() {
+        rows.push(GridRow::Cells(cells));
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::list_tree::TreeRow;
+
+    fn item(entry: u32) -> Row {
+        Row::Item(TreeRow { depth: 0, folder: 0, entry })
+    }
+
+    #[test]
+    fn group_starts_a_new_grid_row() {
+        let tree = Flattened {
+            folders: vec!["r".into()],
+            rows: vec![
+                Row::Header { label: "a".into(), count: 3 },
+                item(0),
+                item(1),
+                item(2),
+                Row::Header { label: "b".into(), count: 1 },
+                item(3),
+            ],
+        };
+        let rows = grid_rows_of(&tree, 2);
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| match r {
+                GridRow::Header { .. } => vec![],
+                GridRow::Cells(c) => c.clone(),
+            })
+            .collect();
+        assert_eq!(shape, [vec![], vec![0, 1], vec![2], vec![], vec![3]]);
+    }
+}
 
 impl Browser {
     fn click_cell(&mut self, path: PathBuf, is_dir: bool, event: &ClickEvent, cx: &mut Context<Self>) {
@@ -16,7 +93,7 @@ impl Browser {
         cx.notify();
     }
 
-    fn grid_cell(&self, ix: usize, folder: &PathBuf, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn grid_cell(&self, ix: usize, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
         let selected = self.selected.as_deref() == Some(path.as_path());
         let whole_cell = self.settings.grid_selection_matches_hover;
@@ -52,41 +129,58 @@ impl Browser {
             .child(label)
     }
 
-    fn grid_rows(&mut self, per_row: usize, range: Range<usize>, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
-        let (folder, entries): (PathBuf, Vec<(usize, Entry)>) = {
-            let state = &self.pane.read(cx).state;
-            let first = range.start * per_row;
-            let last = (range.end * per_row).min(state.entries.len());
-            (state.path.clone(), (first..last).map(|i| (i, state.entries[i].clone())).collect())
+    fn grid_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(data) = self.grid_data.as_ref().map(|data| data.rows.clone()) else {
+            return div().into_any_element();
         };
-        entries
-            .chunks(per_row)
-            .enumerate()
-            .map(|(row, cells)| {
-                let cells: Vec<_> = cells.iter().map(|(ix, entry)| self.grid_cell(*ix, &folder, entry, cx)).collect();
-                div()
-                    .id(range.start + row)
-                    .flex()
-                    .w_full()
-                    .h(px(theme::GRID_ROW_HEIGHT))
-                    .px_2()
-                    .children(cells)
-            })
-            .collect()
+        let folder = self.pane.read(cx).state.path.clone();
+        match data.get(index) {
+            Some(GridRow::Header { label, count }) => group_header(index, label, *count),
+            Some(GridRow::Cells(cells)) => {
+                let entries: Vec<(usize, Entry)> = {
+                    let state = &self.pane.read(cx).state;
+                    cells.iter().filter_map(|&i| Some((i as usize, state.entries.get(i as usize)?.clone()))).collect()
+                };
+                let cells: Vec<_> = entries.iter().map(|(ix, entry)| self.grid_cell(*ix, &folder, entry, cx)).collect();
+                div().id(index).flex().w_full().h(px(theme::GRID_ROW_HEIGHT)).px_2().children(cells).into_any_element()
+            }
+            None => div().into_any_element(),
+        }
+    }
+
+    /// 中身か横の個数が変わった時だけ、行を作り直す。スクロールの位置は保つ。
+    fn refresh_grid(&mut self, per_row: usize, cx: &Context<Self>) {
+        let pane = self.pane.read(cx);
+        let group = self.view.group;
+        let today = filer_shell::today();
+        let fresh = self.grid_data.as_ref().is_some_and(|data| {
+            data.version == pane.version && data.group == group && data.per_row == per_row && data.today == today
+        });
+        if fresh {
+            return;
+        }
+        let (_, tree) = Self::plain_tree(pane, group);
+        let rows = Rc::new(grid_rows_of(&tree, per_row));
+        let version = pane.version;
+        let old = self.grid_list.item_count();
+        self.grid_list.splice(0..old, rows.len());
+        self.grid_data = Some(GridData { version, group, per_row, today, rows });
     }
 
     pub fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let width: f32 = (window.viewport_size().width - px(theme::SIDEBAR_WIDTH + 16.)).into();
         let per_row = ((width / theme::GRID_CELL_WIDTH) as usize).max(1);
-        let rows = self.pane.read(cx).state.entries.len().div_ceil(per_row);
-        div().flex_1().min_h_0().on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx))).child(
-            uniform_list(
-                "grid",
-                rows,
-                cx.processor(move |this, range, _: &mut Window, cx| this.grid_rows(per_row, range, cx)),
+        self.refresh_grid(per_row, cx);
+        div()
+            .flex_1()
+            .min_h_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx)))
+            .child(
+                list(
+                    self.grid_list.clone(),
+                    cx.processor(|this, index: usize, _: &mut Window, cx| this.grid_row(index, cx)),
+                )
+                .size_full(),
             )
-            .track_scroll(self.grid_scroll.clone())
-            .size_full(),
-        )
     }
 }

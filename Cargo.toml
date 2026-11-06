@@ -9,6 +9,7 @@ edition = "2024"
 [workspace.dependencies]
 filer-core = { path = "crates/core" }
 filer-shell = { path = "crates/shell" }
+filer-store = { path = "crates/store" }
 gpui = "=0.2.2"
 windows = "0.61"
 

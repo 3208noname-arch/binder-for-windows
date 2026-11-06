@@ -1,47 +1,58 @@
-use crate::browser::{Browser, Column, ColumnResize};
+use crate::browser::{Browser, Column, Resize};
 use crate::icon_cache::{LARGE, SMALL};
+use crate::list_tree::{Flattened, Row};
+use crate::list_view::group_header;
 use crate::theme;
-use filer_core::{Entry, format_size, kind_of};
+use filer_core::{Entry, fit_width, format_size, kind_of};
 use filer_shell::format_time;
 use gpui::{
-    ClickEvent, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Point, UniformListScrollHandle,
-    Window, div, prelude::*, px, rgb, uniform_list,
+    ClickEvent, Context, CursorStyle, MouseButton, MouseDownEvent, Point, UniformListScrollHandle, Window, div,
+    prelude::*, px, rgb, uniform_list,
 };
 use std::ffi::OsString;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 
-/// ドラッグの量から列の幅を決める。
-fn resized_width(start_width: f32, start_x: f32, x: f32) -> f32 {
-    (start_width + x - start_x).clamp(theme::COLUMN_MIN_WIDTH, theme::COLUMN_MAX_WIDTH)
+/// 列の幅を範囲に収める。
+fn clamp_column_width(width: f32) -> f32 {
+    width.clamp(theme::COLUMN_MIN_WIDTH, theme::COLUMN_MAX_WIDTH)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resized_width;
+    use super::clamp_column_width;
     use crate::theme::{COLUMN_MAX_WIDTH, COLUMN_MIN_WIDTH};
 
     #[test]
-    fn width_follows_drag_within_limits() {
-        assert_eq!(resized_width(230., 500., 550.), 280.);
-        assert_eq!(resized_width(230., 500., 0.), COLUMN_MIN_WIDTH);
-        assert_eq!(resized_width(230., 500., 5000.), COLUMN_MAX_WIDTH);
+    fn width_stays_within_limits() {
+        assert_eq!(clamp_column_width(280.), 280.);
+        assert_eq!(clamp_column_width(0.), COLUMN_MIN_WIDTH);
+        assert_eq!(clamp_column_width(5000.), COLUMN_MAX_WIDTH);
     }
 }
 
 impl Browser {
-    /// 列の境界のドラッグを追う。ウィンドウの外でボタンを離した時は、次の移動で終える。
-    pub fn drag_column(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(resize) = self.resizing else { return };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.resizing = None;
-            return;
-        }
-        let width = resized_width(resize.start_width, resize.start_x, event.position.x.into());
-        if let Some(column) = self.columns.get_mut(resize.column) {
-            column.width = width;
+    pub fn resize_column_view(&mut self, column: usize, width: f32, cx: &mut Context<Self>) {
+        let width = clamp_column_width(width);
+        if let Some(current) = self.columns.get_mut(column) {
+            current.view.column_width = width;
+            if column == 0 {
+                self.view.column_width = width;
+            }
+            self.active_column = column;
             cx.notify();
         }
+    }
+
+    /// 列の境界のダブルクリック。いちばん長い名前に合わせる。
+    fn fit_column(&mut self, column: usize, cx: &mut Context<Self>) {
+        let Some(current) = self.columns.get(column) else { return };
+        let state = &current.pane.read(cx).state;
+        let names = state.entries.iter().map(|entry| entry.name.as_str());
+        let width = fit_width(names, theme::TEXT_SIZE, theme::COLUMN_FIT_PADDING);
+        self.resize_column_view(column, width, cx);
+        self.save_active_view(cx);
     }
 
     /// 列の余白を押した時は、その列の選択を解いて右の列を閉じる。
@@ -49,6 +60,7 @@ impl Browser {
         if let Some(current) = self.columns.get_mut(column) {
             current.selected = None;
             self.columns.truncate(column + 1);
+            self.active_column = column;
             self.preview = None;
             cx.notify();
         }
@@ -58,6 +70,7 @@ impl Browser {
     fn select_in_column(&mut self, column: usize, name: OsString, entry: Entry, event: &ClickEvent, cx: &mut Context<Self>) {
         let Some(current) = self.columns.get_mut(column) else { return };
         current.selected = Some(name.clone());
+        self.active_column = column;
         let folder = current.pane.read(cx).state.path.clone();
         let path = folder.join(&name);
         if event.click_count() == 2 && entry.is_dir {
@@ -67,9 +80,10 @@ impl Browser {
         self.columns.truncate(column + 1);
         if entry.is_dir {
             self.preview = None;
-            let pane = self.new_pane(path, cx);
-            let width = self.settings.default_column_width;
-            self.columns.push(Column { pane, scroll: UniformListScrollHandle::new(), selected: None, width });
+            let view = self.view_of(&path);
+            let pane = self.new_pane(path, view.order, view.needs_properties(), cx);
+            self.columns.push(Column { pane, scroll: UniformListScrollHandle::new(), selected: None, view, tree: None });
+            self.active_column = column + 1;
         } else {
             self.preview = Some((folder, entry));
         }
@@ -78,18 +92,36 @@ impl Browser {
         cx.notify();
     }
 
-    fn column_rows(&mut self, column: usize, range: Range<usize>, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
+    fn column_tree(&mut self, column: usize, cx: &Context<Self>) -> Rc<Flattened> {
+        let current = &self.columns[column];
+        let group = current.view.group;
+        let pane = current.pane.read(cx);
+        if let Some((key, tree)) = &current.tree
+            && key.root_version == pane.version
+            && key.group == group
+            && key.today == filer_shell::today()
+        {
+            return tree.clone();
+        }
+        let (key, tree) = Self::plain_tree(pane, group);
+        let tree = Rc::new(tree);
+        self.columns[column].tree = Some((key, tree.clone()));
+        tree
+    }
+
+    fn column_rows(&mut self, column: usize, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(current) = self.columns.get(column) else { return Vec::new() };
         let selected = current.selected.clone();
+        let pane = current.pane.clone();
         let (selected_background, selected_text) = self.selection_colors();
-        let (folder, entries): (PathBuf, Vec<Option<Entry>>) = {
-            let state = &current.pane.read(cx).state;
-            (state.path.clone(), range.clone().map(|ix| state.entries.get(ix).cloned()).collect())
-        };
+        let folder: PathBuf = pane.read(cx).state.path.clone();
         range
-            .zip(entries)
-            .filter_map(|(ix, entry)| {
-                let entry = entry?;
+            .filter_map(|ix| {
+                let row = match tree.rows.get(ix)? {
+                    Row::Header { label, count } => return Some(group_header(ix, label, *count)),
+                    Row::Item(row) => *row,
+                };
+                let entry = pane.read(cx).state.entries.get(row.entry as usize)?.clone();
                 let active = selected.as_deref() == Some(entry.os_name());
                 let background = match (active, ix % 2 == 1) {
                     (true, _) => selected_background,
@@ -119,31 +151,35 @@ impl Browser {
                         }))
                         .child(icon)
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
-                        .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›"))),
+                        .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")))
+                        .into_any_element(),
                 )
             })
             .collect()
     }
 
-    fn column_list(&self, column: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn column_list(&mut self, column: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tree = self.column_tree(column, cx);
         let current = &self.columns[column];
-        let state = &current.pane.read(cx).state;
-        let count = state.entries.len();
-        let error = state.error.clone();
+        let error = current.pane.read(cx).state.error.clone();
         let scroll = current.scroll.clone();
+        let width = current.view.column_width;
         let body = match error {
             Some(message) => div().p_2().text_color(rgb(theme::SUB_TEXT)).child(message).into_any_element(),
-            None => uniform_list(
-                ("column", column),
-                count,
-                cx.processor(move |this, range, _: &mut Window, cx| this.column_rows(column, range, cx)),
-            )
-            .track_scroll(scroll)
-            .size_full()
-            .into_any_element(),
+            None => {
+                let count = tree.rows.len();
+                uniform_list(
+                    ("column", column),
+                    count,
+                    cx.processor(move |this, range, _: &mut Window, cx| this.column_rows(column, &tree, range, cx)),
+                )
+                .track_scroll(scroll)
+                .size_full()
+                .into_any_element()
+            }
         };
-        let width = current.width;
         let handle = div()
+            .id(("column-handle", column))
             .absolute()
             .top_0()
             .right_0()
@@ -154,8 +190,13 @@ impl Browser {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.resizing = Some(ColumnResize { column, start_x: event.position.x.into(), start_width: width });
                     cx.stop_propagation();
+                    this.active_column = column;
+                    if event.click_count == 2 {
+                        this.fit_column(column, cx);
+                    } else {
+                        this.resizing = Some(Resize::Column { column, start_x: event.position.x.into(), start_width: width });
+                    }
                 }),
             );
         div()

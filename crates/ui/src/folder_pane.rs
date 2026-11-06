@@ -1,6 +1,9 @@
 use crate::list_state::{ListState, coalesce};
-use filer_core::{Entry, Properties, SortKey, SortOrder};
-use filer_shell::{ListJob, PropertiesJob, start_list, start_properties};
+use crate::list_tree::{Flattened, flatten, flatten_grouped};
+use filer_core::{
+    Date, Entry, Group, GroupKey, Properties, SortKey, SortOrder, date_group, name_group, size_group, value_group,
+};
+use filer_shell::{ListJob, PropertiesJob, local_date, start_list, start_properties};
 use futures::StreamExt;
 use gpui::{Context, Task};
 use std::collections::HashMap;
@@ -28,6 +31,30 @@ struct Measure {
     start: Instant,
     first_row_seen: bool,
     reopened: bool,
+}
+
+/// 1つのフォルダの項目がどのグループに入るか。
+pub fn group_of(entry: &Entry, key: GroupKey, properties: Option<&Properties>, today: Date) -> Group {
+    let value = |read: fn(&Properties) -> &str| value_group(properties.map_or("", read));
+    match key {
+        GroupKey::None | GroupKey::Name => name_group(&entry.name),
+        GroupKey::Modified => date_group(local_date(entry.modified), today),
+        GroupKey::Created => date_group(local_date(entry.created), today),
+        GroupKey::Size => size_group(entry),
+        GroupKey::Author => value(|p| &p.author),
+        GroupKey::Tags => value(|p| &p.tags),
+        GroupKey::Title => value(|p| &p.title),
+    }
+}
+
+/// フォルダの中身を表示する行へ展開する。`lists` に入っている子フォルダは親の下に並ぶ。
+pub fn tree_for(root: &FolderPane, lists: &HashMap<PathBuf, &[Entry]>, group: GroupKey, today: Date) -> Flattened {
+    match group {
+        GroupKey::None => flatten(&root.state.path, lists),
+        _ => flatten_grouped(&root.state.path, lists, &|entry| {
+            group_of(entry, group, root.properties.get(entry.os_name()), today)
+        }),
+    }
 }
 
 /// 測定用に順番を崩す。Rustの並べ替えは整列済みの入力で速いので、そのままでは測れない。

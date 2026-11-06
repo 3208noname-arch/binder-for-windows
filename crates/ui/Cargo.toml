@@ -10,5 +10,6 @@ path = "src/main.rs"
 [dependencies]
 filer-core.workspace = true
 filer-shell.workspace = true
+filer-store.workspace = true
 futures = "0.3"
 gpui.workspace = true

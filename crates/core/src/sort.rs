@@ -2,15 +2,30 @@ use crate::Entry;
 use rayon::slice::ParallelSliceMut;
 use std::cmp::Ordering;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SortKey {
     Name,
     Modified,
+    Created,
     Size,
     Kind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl SortKey {
+    pub const ALL: [SortKey; 5] = [SortKey::Name, SortKey::Modified, SortKey::Created, SortKey::Size, SortKey::Kind];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Name => "名前",
+            SortKey::Modified => "更新日時",
+            SortKey::Created => "作成日時",
+            SortKey::Size => "サイズ",
+            SortKey::Kind => "種類",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SortOrder {
     pub key: SortKey,
     pub descending: bool,
@@ -24,6 +39,7 @@ fn compare(a: &Entry, b: &Entry, order: SortOrder, cmp: NameCmp) -> Ordering {
         let by_key = match order.key {
             SortKey::Name => cmp(&a.name, &b.name),
             SortKey::Modified => a.modified.cmp(&b.modified),
+            SortKey::Created => a.created.cmp(&b.created),
             SortKey::Size => a.size.cmp(&b.size),
             SortKey::Kind => compare_ignore_case(a.extension(), b.extension()),
         };
@@ -61,10 +77,10 @@ mod tests {
     use crate::kind_of;
 
     fn file(name: &str, size: u64, modified: i64) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: false, size, modified, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, size, modified, created: 0 }
     }
     fn dir(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: true, size: 0, modified: 0, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: true, is_link: false, size: 0, modified: 0, created: 0 }
     }
     fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
@@ -93,6 +109,15 @@ mod tests {
         let mut e = vec![file("a", 0, 0), dir("m"), dir("z")];
         sort_entries(&mut e, SortOrder { key: SortKey::Name, descending: true }, cmp);
         assert_eq!(names(&e), ["z", "m", "a"]);
+    }
+
+    #[test]
+    fn sorts_by_created() {
+        let mut e = vec![file("a", 0, 0), file("b", 0, 0)];
+        e[0].created = 9;
+        e[1].created = 1;
+        sort_entries(&mut e, SortOrder { key: SortKey::Created, descending: false }, cmp);
+        assert_eq!(names(&e), ["b", "a"]);
     }
 
     #[test]

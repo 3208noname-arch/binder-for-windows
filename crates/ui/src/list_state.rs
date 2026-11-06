@@ -130,7 +130,7 @@ mod tests {
     }
 
     fn file(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: false, size: 0, modified: 0, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, size: 0, modified: 0, created: 0 }
     }
     fn names(state: &ListState) -> Vec<&str> {
         state.entries.iter().map(|e| e.name.as_str()).collect()

@@ -189,6 +189,23 @@ fn format_time_is_local_year_to_minute() {
 }
 
 #[test]
+fn folder_size_sums_nested_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a"), vec![0u8; 100]).unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub").join("b"), vec![0u8; 50]).unwrap();
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(filer_shell::folder_size(dir.path(), &flag), Some(150));
+}
+
+#[test]
+fn cancelled_folder_size_returns_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = std::sync::atomic::AtomicBool::new(true);
+    assert_eq!(filer_shell::folder_size(dir.path(), &flag), None);
+}
+
+#[test]
 fn compare_names_is_numeric() {
     assert_eq!(compare_names("a2", "a10"), Ordering::Less);
     assert_eq!(compare_names("B", "a"), Ordering::Greater);

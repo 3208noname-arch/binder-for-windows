@@ -1,7 +1,7 @@
 use crate::Entry;
 
 /// リストのグループ分けの基準。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GroupKey {
     None,
     Name,
@@ -195,7 +195,7 @@ mod tests {
     }
 
     fn entry(size: u64, is_dir: bool) -> Entry {
-        Entry { name: "x".into(), raw_name: None, is_dir, size, modified: 0, created: 0 }
+        Entry { name: "x".into(), raw_name: None, is_dir, is_link: false, size, modified: 0, created: 0 }
     }
 
     #[test]

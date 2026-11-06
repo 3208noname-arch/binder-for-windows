@@ -1,0 +1,12 @@
+[package]
+name = "filer-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+filer-core.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

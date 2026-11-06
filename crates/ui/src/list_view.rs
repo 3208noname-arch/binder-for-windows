@@ -1,24 +1,23 @@
-use crate::browser::{Browser, TreeKey};
+use crate::browser::{Browser, HeaderDrag, Menu, Resize, TreeKey};
+use crate::folder_pane::tree_for;
 use crate::icon_cache::SMALL;
-use crate::list_tree::{Flattened, Row, flatten, flatten_grouped};
+use crate::list_tree::{Flattened, Row};
 use crate::theme;
-use filer_core::{
-    Date, Entry, Group, GroupKey, Properties, SortKey, date_group, format_size, kind_of, name_group, size_group,
-    value_group,
-};
-use filer_shell::{format_time, local_date, today};
+use filer_core::{Entry, Field, fit_width, format_size, kind_of};
+use filer_shell::{format_time, today};
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, Div, MouseButton, Stateful, Window, div, prelude::*, px, rgb,
-    uniform_list,
+    AnyElement, ClickEvent, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Window, div,
+    prelude::*, px, rgb, uniform_list,
 };
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-fn group_header(ix: usize, label: &str, count: usize) -> AnyElement {
+/// グループの見出しの行。
+pub fn group_header(id: impl Into<gpui::ElementId>, label: &str, count: usize) -> AnyElement {
     div()
-        .id(ix)
+        .id(id)
         .flex()
         .items_end()
         .gap_2()
@@ -34,19 +33,6 @@ fn group_header(ix: usize, label: &str, count: usize) -> AnyElement {
         .into_any_element()
 }
 
-fn group_of(entry: &Entry, key: GroupKey, properties: Option<&Properties>, today: Date) -> Group {
-    let value = |read: fn(&Properties) -> &str| value_group(properties.map_or("", read));
-    match key {
-        GroupKey::None | GroupKey::Name => name_group(&entry.name),
-        GroupKey::Modified => date_group(local_date(entry.modified), today),
-        GroupKey::Created => date_group(local_date(entry.created), today),
-        GroupKey::Size => size_group(entry),
-        GroupKey::Author => value(|p| &p.author),
-        GroupKey::Tags => value(|p| &p.tags),
-        GroupKey::Title => value(|p| &p.title),
-    }
-}
-
 impl Browser {
     /// 今の行の並び。開いているフォルダの子を親の下へ展開する。中身が変わるまでは作り直さない。
     fn tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
@@ -56,7 +42,7 @@ impl Browser {
             root_version: root.version,
             expanded_version: self.expanded.values().map(|pane| pane.read(cx).version).sum(),
             expanded_count: self.expanded.len(),
-            group: self.group,
+            group: self.view.group,
             today,
         };
         if let Some((cached, tree)) = &self.tree_cache
@@ -69,14 +55,7 @@ impl Browser {
         for (path, pane) in &self.expanded {
             lists.insert(path.clone(), &pane.read(cx).state.entries);
         }
-        let group = self.group;
-        let flat = match group {
-            GroupKey::None => flatten(&root.state.path, &lists),
-            _ => flatten_grouped(&root.state.path, &lists, &|entry| {
-                group_of(entry, group, root.properties.get(entry.os_name()), today)
-            }),
-        };
-        let tree = Rc::new(flat);
+        let tree = Rc::new(tree_for(root, &lists, self.view.group, today));
         self.tree_cache = Some((key, tree.clone()));
         tree
     }
@@ -89,7 +68,8 @@ impl Browser {
 
     fn toggle_expanded(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.expanded.remove(&path).is_none() {
-            let pane = self.new_pane(path.clone(), cx);
+            let (order, wants) = (self.view.order, false);
+            let pane = self.new_pane(path.clone(), order, wants, cx);
             self.expanded.insert(path, pane);
         } else {
             // 閉じたフォルダの中で開いていた分も閉じる
@@ -108,39 +88,163 @@ impl Browser {
         cx.notify();
     }
 
-    fn header_cell(&self, label: &str, key: SortKey, cx: &mut Context<Self>) -> Stateful<Div> {
-        let mark = match (self.order.key == key, self.order.descending) {
+    /// 1つの項目のセルの文字列。
+    fn field_text(&mut self, field: Field, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> String {
+        let properties = || {
+            let root = self.pane.read(cx);
+            (root.state.path == folder).then(|| root.properties.get(entry.os_name()).cloned()).flatten()
+        };
+        match field {
+            Field::Name => entry.name.clone(),
+            Field::Modified => format_time(entry.modified),
+            Field::Created => format_time(entry.created),
+            Field::Size if !entry.is_dir => format_size(entry.size),
+            Field::Size => {
+                let path = folder.join(entry.os_name());
+                self.sizes.update(cx, |sizes, _| sizes.get(&path)).map_or("--".to_string(), format_size)
+            }
+            Field::Kind => kind_of(entry),
+            Field::Author => properties().map(|p| p.author).unwrap_or_default(),
+            Field::Tags => properties().map(|p| p.tags).unwrap_or_default(),
+            Field::Title => properties().map(|p| p.title).unwrap_or_default(),
+        }
+    }
+
+    /// 項目の境界のダブルクリック。いちばん長い中身に合わせる。
+    fn fit_field(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(column) = self.view.columns.get(index).copied() else { return };
+        let width = if column.field == Field::Name {
+            let root = self.pane.read(cx);
+            let lists = std::iter::once(&root.state.entries)
+                .chain(self.expanded.values().map(|pane| &pane.read(cx).state.entries));
+            let names = lists.flatten().map(|entry| entry.name.as_str());
+            fit_width(names, theme::TEXT_SIZE, theme::NAME_FIT_PADDING)
+        } else {
+            let folder = self.pane.read(cx).state.path.clone();
+            let entries = self.pane.read(cx).state.entries.clone();
+            let texts: Vec<String> =
+                entries.iter().map(|entry| self.field_text(column.field, &folder, entry, cx)).collect();
+            fit_width(texts.iter().map(String::as_str).chain([column.field.label()]), theme::TEXT_SIZE, theme::FIELD_FIT_PADDING)
+        };
+        self.update_view(cx, |view| view.resize_column(index, width));
+    }
+
+    pub fn drag_resize(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let x: f32 = event.position.x.into();
+        match self.resizing {
+            Some(Resize::Field { index, start_x, start_width }) => {
+                self.view.resize_column(index, start_width + x - start_x);
+                self.columns[0].view = self.view.clone();
+                cx.notify();
+            }
+            Some(Resize::Column { column, start_x, start_width }) => self.resize_column_view(column, start_width + x - start_x, cx),
+            None => {}
+        }
+    }
+
+    /// 窓の座標から、見出しのどの位置かを求める。
+    fn header_position(&self, x: f32) -> usize {
+        let offset: f32 = self.list_columns_scroll.offset().x.into();
+        let mut edge = theme::SIDEBAR_WIDTH + theme::ROW_SIDE_PADDING + offset;
+        for (index, column) in self.view.columns.iter().enumerate() {
+            edge += column.width + theme::FIELD_GAP;
+            if x < edge {
+                return index;
+            }
+        }
+        self.view.columns.len().saturating_sub(1)
+    }
+
+    pub fn drag_header(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let x: f32 = event.position.x.into();
+        let target = self.header_position(x);
+        if let Some(drag) = &mut self.header_drag
+            && (drag.target.is_some() || (x - drag.start_x).abs() > theme::DRAG_THRESHOLD)
+        {
+            drag.target = Some(target);
+            cx.notify();
+        }
+    }
+
+    pub fn drop_header(&mut self, drag: HeaderDrag, cx: &mut Context<Self>) {
+        match drag.target {
+            Some(target) => self.update_view(cx, |view| view.move_column(drag.index, target)),
+            None => {
+                let key = self.view.columns.get(drag.index).and_then(|c| c.field.sort_key());
+                if let Some(key) = key {
+                    self.toggle_sort(key, cx);
+                }
+            }
+        }
+    }
+
+    fn header_cell(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let column = self.view.columns[index];
+        let order = self.view.order;
+        let mark = match (column.field.sort_key() == Some(order.key), order.descending) {
             (false, _) => "",
             (true, false) => " ▲",
             (true, true) => " ▼",
         };
+        let dropping = self.header_drag.is_some_and(|drag| drag.target == Some(index) && drag.index != index);
+        let start_width = column.width;
+        let handle = div()
+            .id(("field-handle", index))
+            .absolute()
+            .top_0()
+            .right(px(-theme::COLUMN_HANDLE_WIDTH))
+            .h_full()
+            .w(px(theme::COLUMN_HANDLE_WIDTH))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .hover(|s| s.bg(rgb(theme::LINE)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if event.click_count == 2 {
+                        this.fit_field(index, cx);
+                    } else {
+                        this.resizing = Some(Resize::Field { index, start_x: event.position.x.into(), start_width });
+                    }
+                }),
+            );
         div()
-            .id(gpui::ElementId::Name(format!("header-{key:?}").into()))
+            .id(("field-header", index))
+            .relative()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .w(px(column.width))
             .cursor(CursorStyle::PointingHand)
-            .child(format!("{label}{mark}"))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_sort(key, cx)))
+            .when(dropping, |cell| cell.bg(rgb(theme::HOVER)))
+            .when(column.field == Field::Name, |cell| cell.pl(px(theme::DISCLOSURE_WIDTH + theme::ROW_ICON + theme::FIELD_GAP)))
+            .child(div().overflow_hidden().whitespace_nowrap().child(format!("{}{mark}", column.field.label())))
+            .child(handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                    this.header_drag = Some(HeaderDrag { index, start_x: event.position.x.into(), target: None });
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.menu = Some(Menu::Fields(event.position));
+                    cx.notify();
+                }),
+            )
     }
 
-    fn list_row(&self, ix: usize, depth: u32, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let path = folder.join(entry.os_name());
-        let selected = self.selected.as_deref() == Some(path.as_path());
-        let expanded = self.expanded.get(&path);
+    fn name_cell(&mut self, depth: u32, folder: &Path, entry: &Entry, path: &Path, sub_text: u32, cx: &mut Context<Self>) -> AnyElement {
+        let is_dir = entry.is_dir;
+        let expanded = self.expanded.get(path);
         let note = expanded.and_then(|pane| pane.read(cx).state.note());
         let expanded = expanded.is_some();
-        let (selected_background, selected_text) = self.selection_colors();
-        let background = match (selected, ix % 2 == 1) {
-            (true, _) => selected_background,
-            (false, true) => theme::STRIPE,
-            (false, false) => theme::BACKGROUND,
-        };
-        let sub_text = if selected { selected_text } else { theme::SUB_TEXT };
-        let text = if selected { selected_text } else { theme::TEXT };
-        let is_dir = entry.is_dir;
-        let size = if is_dir { "--".to_string() } else { format_size(entry.size) };
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
         let slot = div().flex_none().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
         let disclosure = if is_dir {
-            let target = path.clone();
+            let target = path.to_path_buf();
             slot.id(gpui::ElementId::Name(format!("open-{}", path.display()).into()))
                 .cursor(CursorStyle::PointingHand)
                 .child(if expanded { "▾" } else { "▸" })
@@ -153,34 +257,57 @@ impl Browser {
             slot.into_any_element()
         };
         div()
+            .flex()
+            .size_full()
+            .items_center()
+            .gap_1()
+            .pl(px(depth as f32 * theme::INDENT))
+            .child(disclosure)
+            .child(self.icon(icon, is_dir, theme::ROW_ICON))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()))
+            .children(note.map(|note| div().flex_none().text_color(rgb(sub_text)).child(note)))
+            .into_any_element()
+    }
+
+    fn list_row(&mut self, ix: usize, depth: u32, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let path = folder.join(entry.os_name());
+        let selected = self.selected.as_deref() == Some(path.as_path());
+        let (selected_background, selected_text) = self.selection_colors();
+        let background = match (selected, ix % 2 == 1) {
+            (true, _) => selected_background,
+            (false, true) => theme::STRIPE,
+            (false, false) => theme::BACKGROUND,
+        };
+        let sub_text = if selected { selected_text } else { theme::SUB_TEXT };
+        let text = if selected { selected_text } else { theme::TEXT };
+        let is_dir = entry.is_dir;
+        let columns = self.view.columns.clone();
+        let cells: Vec<_> = columns
+            .iter()
+            .map(|column| {
+                let cell = div().flex_none().h_full().flex().items_center().w(px(column.width)).overflow_hidden();
+                if column.field == Field::Name {
+                    cell.child(self.name_cell(depth, folder, entry, &path, sub_text, cx))
+                } else {
+                    let content = self.field_text(column.field, folder, entry, cx);
+                    cell.text_color(rgb(sub_text)).whitespace_nowrap().child(content)
+                }
+            })
+            .collect();
+        div()
             .id(ix)
             .flex()
             .items_center()
             .w_full()
             .h(px(theme::ROW_HEIGHT))
-            .px_3()
-            .gap_2()
+            .px(px(theme::ROW_SIDE_PADDING))
+            .gap(px(theme::FIELD_GAP))
             .bg(rgb(background))
             .text_color(rgb(text))
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, event, _, cx| this.click_list_row(path.clone(), is_dir, event, cx)))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_center()
-                    .gap_1()
-                    .pl(px(depth as f32 * theme::INDENT))
-                    .child(disclosure)
-                    .child(self.icon(icon, is_dir, theme::ROW_ICON))
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()))
-                    .children(note.map(|note| div().flex_none().text_color(rgb(sub_text)).child(note))),
-            )
-            .child(div().flex_none().w(px(theme::DATE_WIDTH)).text_color(rgb(sub_text)).child(format_time(entry.modified)))
-            .child(div().flex_none().w(px(theme::SIZE_WIDTH)).text_color(rgb(sub_text)).child(size))
-            .child(div().flex_none().w(px(theme::KIND_WIDTH)).text_color(rgb(sub_text)).child(kind_of(entry)))
+            .children(cells)
     }
 
     fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -197,38 +324,44 @@ impl Browser {
     }
 
     pub fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let cells: Vec<_> = (0..self.view.columns.len()).map(|index| self.header_cell(index, cx)).collect();
+        let total: f32 = self.view.columns.iter().map(|c| c.width + theme::FIELD_GAP).sum::<f32>() + theme::ROW_SIDE_PADDING * 2.0;
         let header = div()
             .flex()
             .flex_none()
             .w_full()
             .h(px(theme::ROW_HEIGHT))
             .items_center()
-            .px_3()
-            .gap_2()
+            .px(px(theme::ROW_SIDE_PADDING))
+            .gap(px(theme::FIELD_GAP))
             .border_b_1()
             .border_color(rgb(theme::LINE))
             .text_color(rgb(theme::SUB_TEXT))
-            .child(div().flex_1().min_w_0().pl(px(theme::DISCLOSURE_WIDTH + theme::ROW_ICON + 8.)).child(self.header_cell("名前", SortKey::Name, cx)))
-            .child(div().flex_none().w(px(theme::DATE_WIDTH)).child(self.header_cell("更新日時", SortKey::Modified, cx)))
-            .child(div().flex_none().w(px(theme::SIZE_WIDTH)).child(self.header_cell("サイズ", SortKey::Size, cx)))
-            .child(div().flex_none().w(px(theme::KIND_WIDTH)).child(self.header_cell("種類", SortKey::Kind, cx)));
+            .children(cells);
         // 1回の描画で何度も呼ばれるので、行の並びは1回だけ作る
         let tree = self.tree(cx);
         let count = tree.rows.len();
-        div().flex().flex_col().flex_1().min_h_0().child(header).child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx)))
-                .child(
-                uniform_list(
-                    "list-rows",
-                    count,
-                    cx.processor(move |this, range, _: &mut Window, cx| this.list_rows(&tree, range, cx)),
-                )
-                    .track_scroll(self.list_scroll.clone())
-                    .size_full(),
-            ),
-        )
+        let mut strip = div()
+            .id("list-strip")
+            .flex_1()
+            .min_h_0()
+            .overflow_x_scroll()
+            .track_scroll(&self.list_columns_scroll)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.clear_selection(cx)))
+            .child(
+                div().flex().flex_col().h_full().min_w_full().w(px(total)).child(header).child(
+                    div().flex_1().min_h_0().child(
+                        uniform_list(
+                            "list-rows",
+                            count,
+                            cx.processor(move |this, range, _: &mut Window, cx| this.list_rows(&tree, range, cx)),
+                        )
+                        .track_scroll(self.list_scroll.clone())
+                        .size_full(),
+                    ),
+                ),
+            );
+        strip.style().restrict_scroll_to_axis = Some(true);
+        strip
     }
 }

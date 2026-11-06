@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME};
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
     FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
 };
 use windows::core::PCWSTR;
@@ -99,6 +99,31 @@ fn enumerate(
     result
 }
 
+/// フォルダの中身の合計サイズ。止められた時は `None`。読めないサブフォルダは0として数える。
+pub fn folder_size(path: &Path, cancelled: &AtomicBool) -> Option<u64> {
+    let mut total = 0;
+    let mut folders = vec![path.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut add = |event| {
+            if let ListEvent::Batch(batch) = event {
+                for entry in batch {
+                    match (entry.is_dir, entry.is_link) {
+                        (false, _) => total += entry.size,
+                        // ジャンクションは同じ中身を二重に数えたり循環したりするので辿らない
+                        (true, false) => folders.push(folder.join(entry.os_name())),
+                        (true, true) => {}
+                    }
+                }
+            }
+        };
+        let _ = enumerate(&folder, cancelled, &mut add);
+    }
+    Some(total)
+}
+
 fn to_entry(data: &WIN32_FIND_DATAW) -> Option<Entry> {
     let len = data.cFileName.iter().position(|&c| c == 0).unwrap_or(data.cFileName.len());
     let (name, raw_name) = match OsString::from_wide(&data.cFileName[..len]).into_string() {
@@ -113,6 +138,7 @@ fn to_entry(data: &WIN32_FIND_DATAW) -> Option<Entry> {
         name,
         raw_name,
         is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+        is_link: data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
         size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
         modified: to_i64(data.ftLastWriteTime),
         created: to_i64(data.ftCreationTime),
