@@ -15,3 +15,7 @@ windows = "0.61"
 
 [profile.release]
 debug = 1
+
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
+
