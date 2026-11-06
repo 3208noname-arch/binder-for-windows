@@ -42,6 +42,19 @@ impl ListState {
         }
     }
 
+    /// 入れ子で開いたフォルダに添える一言。中身が見えない理由を示す。
+    pub fn note(&self) -> Option<&'static str> {
+        if self.error.is_some() {
+            Some("開けません")
+        } else if self.loading {
+            Some("読み込み中…")
+        } else if self.entries.is_empty() {
+            Some("空")
+        } else {
+            None
+        }
+    }
+
     pub fn set_order(&mut self, order: SortOrder) {
         self.order = order;
         sort_entries(&mut self.entries, order, compare_names);
@@ -69,6 +82,22 @@ pub fn coalesce(events: Vec<ListEvent>) -> Vec<ListEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_tells_why_a_folder_shows_nothing() {
+        let mut s = ListState::new("a".into());
+        let g = s.open("a".into());
+        assert_eq!(s.note(), Some("読み込み中…"));
+        s.apply(g, ListEvent::Done);
+        assert_eq!(s.note(), Some("空"));
+        let g = s.open("b".into());
+        s.apply(g, ListEvent::Failed("no".into()));
+        assert_eq!(s.note(), Some("開けません"));
+        let g = s.open("c".into());
+        s.apply(g, ListEvent::Batch(vec![file("x")]));
+        s.apply(g, ListEvent::Done);
+        assert_eq!(s.note(), None);
+    }
 
     #[test]
     fn loading_lasts_until_listing_ends() {

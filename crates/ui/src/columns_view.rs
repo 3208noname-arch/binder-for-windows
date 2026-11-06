@@ -136,7 +136,7 @@ impl Browser {
     pub fn render_columns(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let columns: Vec<_> = (0..self.columns.len()).map(|i| self.column_list(i, cx)).collect();
         let preview = self.preview_panel(cx);
-        div()
+        let mut strip = div()
             .id("columns")
             .flex()
             .flex_1()
@@ -144,6 +144,9 @@ impl Browser {
             .overflow_x_scroll()
             .track_scroll(&self.columns_scroll)
             .children(columns)
-            .children(preview)
+            .children(preview);
+        // 列の縦スクロールで、並び全体まで横に動かないようにする
+        strip.style().restrict_scroll_to_axis = Some(true);
+        strip
     }
 }

@@ -8,6 +8,7 @@ use gpui::{ClickEvent, Context, CursorStyle, Div, Stateful, Window, div, prelude
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 impl Browser {
     /// 今の行の並び。開いているフォルダの子を親の下へ展開する。
@@ -64,7 +65,9 @@ impl Browser {
     fn list_row(&self, ix: usize, depth: u32, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
         let selected = self.selected.as_deref() == Some(path.as_path());
-        let expanded = self.expanded.contains_key(&path);
+        let expanded = self.expanded.get(&path);
+        let note = expanded.and_then(|pane| pane.read(cx).state.note());
+        let expanded = expanded.is_some();
         let background = match (selected, ix % 2 == 1) {
             (true, _) => theme::SELECTED,
             (false, true) => theme::STRIPE,
@@ -111,15 +114,15 @@ impl Browser {
                     .pl(px(depth as f32 * theme::INDENT))
                     .child(disclosure)
                     .child(self.icon(icon, is_dir, theme::ROW_ICON))
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone())),
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()))
+                    .children(note.map(|note| div().flex_none().text_color(rgb(sub_text)).child(note))),
             )
             .child(div().flex_none().w(px(theme::DATE_WIDTH)).text_color(rgb(sub_text)).child(format_time(entry.modified)))
             .child(div().flex_none().w(px(theme::SIZE_WIDTH)).text_color(rgb(sub_text)).child(size))
             .child(div().flex_none().w(px(theme::KIND_WIDTH)).text_color(rgb(sub_text)).child(kind_of(entry)))
     }
 
-    fn list_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
-        let tree = self.tree(cx);
+    fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
         range
             .filter_map(|ix| {
                 let row = tree.rows.get(ix)?;
@@ -146,10 +149,16 @@ impl Browser {
             .child(div().flex_none().w(px(theme::DATE_WIDTH)).child(self.header_cell("更新日時", SortKey::Modified, cx)))
             .child(div().flex_none().w(px(theme::SIZE_WIDTH)).child(self.header_cell("サイズ", SortKey::Size, cx)))
             .child(div().flex_none().w(px(theme::KIND_WIDTH)).child(self.header_cell("種類", SortKey::Kind, cx)));
-        let count = self.tree(cx).rows.len();
+        // 1回の描画で何度も呼ばれるので、行の並びは1回だけ作る
+        let tree = Rc::new(self.tree(cx));
+        let count = tree.rows.len();
         div().flex().flex_col().flex_1().min_h_0().child(header).child(
             div().flex_1().min_h_0().child(
-                uniform_list("list-rows", count, cx.processor(Self::list_rows))
+                uniform_list(
+                    "list-rows",
+                    count,
+                    cx.processor(move |this, range, _: &mut Window, cx| this.list_rows(&tree, range, cx)),
+                )
                     .track_scroll(self.list_scroll.clone())
                     .size_full(),
             ),

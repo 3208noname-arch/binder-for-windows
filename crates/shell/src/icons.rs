@@ -11,7 +11,7 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTa
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile,
     IShellItemImageFactory, KF_FLAG_DEFAULT, SHCreateItemFromParsingName, SHGetKnownFolderPath,
-    SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+    SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT,
 };
 use windows::core::{GUID, HSTRING};
 
@@ -23,7 +23,7 @@ pub fn init_thread() {
 /// ファイルのアイコンかサムネイルをPNGで返す。`thumbnail` が偽ならアイコンだけを取る。
 pub fn load_icon(path: &Path, size: u32, thumbnail: bool) -> Option<Vec<u8>> {
     let side = size as i32;
-    let flags = if thumbnail { SIIGBF_BIGGERSIZEOK } else { SIIGBF_ICONONLY };
+    let flags = if thumbnail { SIIGBF_RESIZETOFIT } else { SIIGBF_ICONONLY };
     let bitmap = unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
