@@ -1,14 +1,50 @@
-use crate::browser::{Browser, Column};
+use crate::browser::{Browser, Column, ColumnResize};
 use crate::icon_cache::{LARGE, SMALL};
 use crate::theme;
 use filer_core::{Entry, format_size, kind_of};
 use filer_shell::format_time;
-use gpui::{ClickEvent, Context, Point, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list};
+use gpui::{
+    ClickEvent, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Point, UniformListScrollHandle,
+    Window, div, prelude::*, px, rgb, uniform_list,
+};
 use std::ffi::OsString;
 use std::ops::Range;
 use std::path::PathBuf;
 
+/// ドラッグの量から列の幅を決める。
+fn resized_width(start_width: f32, start_x: f32, x: f32) -> f32 {
+    (start_width + x - start_x).clamp(theme::COLUMN_MIN_WIDTH, theme::COLUMN_MAX_WIDTH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resized_width;
+    use crate::theme::{COLUMN_MAX_WIDTH, COLUMN_MIN_WIDTH};
+
+    #[test]
+    fn width_follows_drag_within_limits() {
+        assert_eq!(resized_width(230., 500., 550.), 280.);
+        assert_eq!(resized_width(230., 500., 0.), COLUMN_MIN_WIDTH);
+        assert_eq!(resized_width(230., 500., 5000.), COLUMN_MAX_WIDTH);
+    }
+}
+
 impl Browser {
+    /// 列の境界のドラッグを追う。ウィンドウの外でボタンを離した時は、次の移動で終える。
+    pub fn drag_column(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(resize) = self.resizing else { return };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.resizing = None;
+            return;
+        }
+        let width = resized_width(resize.start_width, resize.start_x, event.position.x.into());
+        if let Some(column) = self.columns.get_mut(resize.column) {
+            column.width = width;
+            self.column_width = width;
+            cx.notify();
+        }
+    }
+
     /// 列の項目を選ぶ。右の列を閉じ、フォルダなら新しい列を開く。
     fn select_in_column(&mut self, column: usize, name: OsString, entry: Entry, event: &ClickEvent, cx: &mut Context<Self>) {
         let Some(current) = self.columns.get_mut(column) else { return };
@@ -23,7 +59,8 @@ impl Browser {
         if entry.is_dir {
             self.preview = None;
             let pane = self.new_pane(path, cx);
-            self.columns.push(Column { pane, scroll: UniformListScrollHandle::new(), selected: None });
+            let width = self.column_width;
+            self.columns.push(Column { pane, scroll: UniformListScrollHandle::new(), selected: None, width });
         } else {
             self.preview = Some((folder, entry));
         }
@@ -94,13 +131,31 @@ impl Browser {
             .size_full()
             .into_any_element(),
         };
+        let width = current.width;
+        let handle = div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .h_full()
+            .w(px(theme::COLUMN_HANDLE_WIDTH))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .hover(|s| s.bg(rgb(theme::LINE)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.resizing = Some(ColumnResize { column, start_x: event.position.x.into(), start_width: width });
+                    cx.stop_propagation();
+                }),
+            );
         div()
+            .relative()
             .flex_none()
-            .w(px(theme::COLUMN_WIDTH))
+            .w(px(width))
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::LINE))
             .child(body)
+            .child(handle)
     }
 
     fn preview_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {

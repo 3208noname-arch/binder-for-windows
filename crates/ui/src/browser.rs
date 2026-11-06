@@ -24,6 +24,27 @@ pub struct Column {
     pub pane: Entity<FolderPane>,
     pub scroll: UniformListScrollHandle,
     pub selected: Option<OsString>,
+    pub width: f32,
+}
+
+/// 列の幅を変えている最中の状態。
+#[derive(Clone, Copy)]
+pub struct ColumnResize {
+    pub column: usize,
+    pub start_x: f32,
+    pub start_width: f32,
+}
+
+/// 利用者が選べる設定。設定画面と保存は、保持の実装の時に足す。
+pub struct Settings {
+    /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
+    pub grid_selection_matches_hover: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { grid_selection_matches_hover: true }
+    }
 }
 
 /// ウィンドウ全体。履歴と表示形式を持ち、3つの表示へ分ける。
@@ -37,6 +58,9 @@ pub struct Browser {
     pub grid_scroll: UniformListScrollHandle,
     pub columns: Vec<Column>,
     pub columns_scroll: ScrollHandle,
+    pub column_width: f32,
+    pub resizing: Option<ColumnResize>,
+    pub settings: Settings,
     pub preview: Option<(PathBuf, Entry)>,
     pub expanded: HashMap<PathBuf, Entity<FolderPane>>,
     pub icons: Entity<IconCache>,
@@ -67,6 +91,9 @@ impl Browser {
             grid_scroll: UniformListScrollHandle::new(),
             columns: Vec::new(),
             columns_scroll: ScrollHandle::new(),
+            column_width: theme::COLUMN_WIDTH,
+            resizing: None,
+            settings: Settings::default(),
             preview: None,
             expanded: HashMap::new(),
             icons,
@@ -86,7 +113,8 @@ impl Browser {
 
     fn reset_columns(&mut self) {
         let pane = self.pane.clone();
-        self.columns = vec![Column { pane, scroll: UniformListScrollHandle::new(), selected: None }];
+        let width = self.column_width;
+        self.columns = vec![Column { pane, scroll: UniformListScrollHandle::new(), selected: None, width }];
         self.preview = None;
     }
 
@@ -317,6 +345,8 @@ impl Render for Browser {
             .text_color(rgb(theme::TEXT))
             .text_size(px(theme::TEXT_SIZE))
             .font_family(theme::FONT)
+            .on_mouse_move(cx.listener(Self::drag_column))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, _| this.resizing = None))
             .child(toolbar)
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
             .child(status)

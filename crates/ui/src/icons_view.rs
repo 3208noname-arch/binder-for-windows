@@ -19,6 +19,7 @@ impl Browser {
     fn grid_cell(&self, ix: usize, folder: &PathBuf, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
         let selected = self.selected.as_deref() == Some(path.as_path());
+        let whole_cell = self.settings.grid_selection_matches_hover;
         let is_dir = entry.is_dir;
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, LARGE));
         let label = div()
@@ -29,7 +30,8 @@ impl Browser {
             .text_center()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .line_clamp(2)
-            .when(selected, |l| l.bg(rgb(theme::SELECTED)).text_color(rgb(theme::SELECTED_TEXT)))
+            .when(selected, |l| l.text_color(rgb(theme::SELECTED_TEXT)))
+            .when(selected && !whole_cell, |l| l.bg(rgb(theme::SELECTED)))
             .child(entry.name.clone());
         div()
             .id(("cell", ix))
@@ -42,6 +44,7 @@ impl Browser {
             .w(px(theme::GRID_CELL_WIDTH))
             .rounded_md()
             .when(!selected, |c| c.hover(|s| s.bg(rgb(theme::HOVER))))
+            .when(selected && whole_cell, |c| c.bg(rgb(theme::SELECTED)))
             .on_click(cx.listener(move |this, event, _, cx| this.click_cell(path.clone(), is_dir, event, cx)))
             .child(self.icon(icon, is_dir, theme::GRID_ICON))
             .child(label)
