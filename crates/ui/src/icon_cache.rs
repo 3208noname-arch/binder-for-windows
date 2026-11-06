@@ -10,6 +10,7 @@ use std::sync::mpsc::{Sender, channel};
 /// アイコンの大きさ（ピクセル）。
 pub const SMALL: u32 = 32;
 pub const LARGE: u32 = 128;
+pub const HUGE: u32 = 256;
 
 /// 1件ごとに違う絵を持つ種類。これ以外は拡張子で共有する。
 const PER_FILE: &[&str] = &["exe", "lnk", "ico", "url"];
@@ -107,7 +108,7 @@ impl IconCache {
         let extension = entry.name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
         let e = extension.as_str();
         let path = folder.join(entry.os_name());
-        let thumbnail = size == LARGE && (IMAGES.contains(&e) || VIDEOS.contains(&e));
+        let thumbnail = size >= LARGE && (IMAGES.contains(&e) || VIDEOS.contains(&e));
         let key = match (entry.is_dir, thumbnail || PER_FILE.contains(&e)) {
             (true, _) => format!("<folder>:{size}"),
             (false, true) => format!("{}:{size}", path.display()),

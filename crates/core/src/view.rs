@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 pub const MIN_FIELD_WIDTH: f32 = 40.0;
 pub const MAX_FIELD_WIDTH: f32 = 1200.0;
 pub const DEFAULT_COLUMN_WIDTH: f32 = 230.0;
+pub const MIN_ICON_SIZE: f32 = 32.0;
+pub const MAX_ICON_SIZE: f32 = 256.0;
+pub const DEFAULT_ICON_SIZE: f32 = 72.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewMode {
@@ -28,11 +31,40 @@ pub struct AppSettings {
     /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
     pub grid_selection_matches_hover: bool,
     pub drag_hover: DragHover,
+    /// ドラッグ中、最初のフォルダを開くまでの待ち時間（ミリ秒）
+    pub spring_first_ms: u64,
+    /// ドラッグ中、2回目以降に開くまでの待ち時間（ミリ秒）
+    pub spring_next_ms: u64,
+    pub long_name: LongName,
+}
+
+/// アイコン表示で名前が収まらない時の見せ方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LongName {
+    /// 最後の行を薄くして消す
+    Fade,
+    /// マウスを乗せた間だけ流して見せる
+    Scroll,
+}
+
+/// 待ち時間の選択肢（ミリ秒）。
+pub const SPRING_CHOICES: [u64; 5] = [500, 1000, 1500, 2000, 3000];
+
+/// 次の選択肢へ進める。最後の次は最初に戻る。
+pub fn next_spring_delay(current: u64) -> u64 {
+    let next = SPRING_CHOICES.iter().find(|&&choice| choice > current);
+    next.copied().unwrap_or(SPRING_CHOICES[0])
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { grid_selection_matches_hover: true, drag_hover: DragHover::Open }
+        Self {
+            grid_selection_matches_hover: true,
+            drag_hover: DragHover::Open,
+            spring_first_ms: 1000,
+            spring_next_ms: 1500,
+            long_name: LongName::Fade,
+        }
     }
 }
 
@@ -116,6 +148,7 @@ pub struct FolderView {
     pub group: GroupKey,
     pub columns: Vec<ListColumn>,
     pub column_width: f32,
+    pub icon_size: f32,
 }
 
 impl Default for FolderView {
@@ -129,6 +162,7 @@ impl Default for FolderView {
             group: GroupKey::None,
             columns,
             column_width: DEFAULT_COLUMN_WIDTH,
+            icon_size: DEFAULT_ICON_SIZE,
         }
     }
 }
@@ -156,6 +190,9 @@ impl FolderView {
         }
         if !(MIN_FIELD_WIDTH..=MAX_FIELD_WIDTH).contains(&self.column_width) {
             self.column_width = DEFAULT_COLUMN_WIDTH;
+        }
+        if !(MIN_ICON_SIZE..=MAX_ICON_SIZE).contains(&self.icon_size) {
+            self.icon_size = DEFAULT_ICON_SIZE;
         }
     }
 
@@ -193,6 +230,17 @@ impl FolderView {
     pub fn has_field(&self, field: Field) -> bool {
         self.columns.iter().any(|column| column.field == field)
     }
+}
+
+/// 高さが同じ行の並びで、範囲選択の枠が触れている行。
+pub fn rows_in_band(y0: f32, y1: f32, row_height: f32, count: usize) -> std::ops::Range<usize> {
+    let (top, bottom) = (y0.min(y1), y0.max(y1));
+    if bottom < 0.0 {
+        return 0..0;
+    }
+    let first = (top.max(0.0) / row_height) as usize;
+    let last = (bottom / row_height) as usize + 1;
+    first.min(count)..last.min(count)
 }
 
 /// 文字列の表示幅の見積もり。全角は1文字分、半角はその6割で数える。
@@ -285,6 +333,21 @@ mod tests {
         assert_eq!(view.mode, ViewMode::Columns);
         let saved = FolderView { mode: ViewMode::Icons, ..FolderView::default() };
         assert_eq!(FolderView::for_folder(Some(saved), ViewMode::Columns).mode, ViewMode::Icons);
+    }
+
+    #[test]
+    fn spring_delay_cycles_through_choices() {
+        assert_eq!(next_spring_delay(500), 1000);
+        assert_eq!(next_spring_delay(3000), 500);
+        assert_eq!(next_spring_delay(700), 1000);
+    }
+
+    #[test]
+    fn row_band_covers_rows_it_touches() {
+        assert_eq!(rows_in_band(10.0, 30.0, 24.0, 10), 0..2);
+        assert_eq!(rows_in_band(30.0, 10.0, 24.0, 10), 0..2);
+        assert_eq!(rows_in_band(50.0, 500.0, 24.0, 4), 2..4);
+        assert_eq!(rows_in_band(-40.0, -10.0, 24.0, 4), 0..0);
     }
 
     #[test]

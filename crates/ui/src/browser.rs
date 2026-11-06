@@ -1,4 +1,5 @@
-use crate::actions::{DragPopup, Renaming, RowPress, Spring};
+use crate::actions::{Band, DragPopup, Renaming, RowPress, Spring, SpringTarget};
+use crate::scrollbar::{IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::icons_view::GridData;
@@ -6,12 +7,13 @@ use crate::list_tree::Flattened;
 use crate::size_cache::SizeCache;
 use crate::theme;
 use filer_core::{
-    AppSettings, Date, DragHover, Entry, Field, FolderView, GroupKey, History, Selection, SortKey, SortOrder, ViewMode,
+    AppSettings, Date, DragHover, Entry, Field, FolderView, GroupKey, History, LongName, Selection, SortKey, SortOrder,
+    ViewMode, next_spring_delay,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
 use gpui::{
-    AnyElement, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState, MouseButton,
+    AnyElement, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState, MouseButton,
     MouseMoveEvent, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -91,7 +93,13 @@ pub struct Browser {
     pub settings: AppSettings,
     pub cut: HashSet<PathBuf>,
     pub spring: Option<Spring>,
-    pub drag_popup: Option<DragPopup>,
+    pub springs_done: u32,
+    pub drag_popups: Vec<DragPopup>,
+    pub band: Option<Band>,
+    pub scroll_drag: Option<ScrollDrag>,
+    pub icon_size_drag: Option<IconSizeDrag>,
+    pub sidebar_scroll: ScrollHandle,
+    pub hovered_cell: Option<PathBuf>,
     pub rename_request: Option<PathBuf>,
     pub drive_labels: HashMap<PathBuf, String>,
     pub menu: Option<Menu>,
@@ -153,7 +161,7 @@ impl Browser {
             synced_version: 0,
             list_scroll: UniformListScrollHandle::new(),
             list_columns_scroll: ScrollHandle::new(),
-            grid_list: ListState::new(0, ListAlignment::Top, px(theme::GRID_ROW_HEIGHT * 2.)),
+            grid_list: ListState::new(0, ListAlignment::Top, px(theme::ROW_HEIGHT * 10.)),
             grid_data: None,
             columns: Vec::new(),
             columns_scroll: ScrollHandle::new(),
@@ -163,7 +171,13 @@ impl Browser {
             settings,
             cut: HashSet::new(),
             spring: None,
-            drag_popup: None,
+            springs_done: 0,
+            drag_popups: Vec::new(),
+            band: None,
+            scroll_drag: None,
+            icon_size_drag: None,
+            sidebar_scroll: ScrollHandle::new(),
+            hovered_cell: None,
             rename_request: None,
             drive_labels: HashMap::new(),
             menu: None,
@@ -250,7 +264,7 @@ impl Browser {
         self.message = None;
         self.menu = None;
         self.renaming = None;
-        self.drag_popup = None;
+        self.drag_popups.clear();
         self.expanded.clear();
         self.sizes.update(cx, |sizes, _| sizes.cancel_running());
         self.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
@@ -372,7 +386,11 @@ impl Browser {
         // ウィンドウの外でボタンを離した時も、変えた幅は残す
         if event.pressed_button != Some(MouseButton::Left) {
             self.press = None;
-            if self.resizing.take().is_some() {
+            self.scroll_drag = None;
+            if self.band.take().is_some() {
+                cx.notify();
+            }
+            if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
                 self.save_active_view(cx);
             }
             self.header_drag = None;
@@ -380,6 +398,12 @@ impl Browser {
         }
         if self.press.is_some() {
             self.drag_row(event, cx);
+        } else if self.scroll_drag.is_some() {
+            self.drag_scroll(event, cx);
+        } else if self.icon_size_drag.is_some() {
+            self.drag_icon_size(event, cx);
+        } else if self.band.is_some() {
+            self.drag_band(event, cx);
         } else if self.resizing.is_some() {
             self.drag_resize(event, cx);
         } else if self.header_drag.is_some() {
@@ -390,7 +414,11 @@ impl Browser {
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
         self.end_press();
         self.end_spring();
-        if self.resizing.take().is_some() {
+        self.scroll_drag = None;
+        if self.band.take().is_some() {
+            cx.notify();
+        }
+        if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
             self.save_active_view(cx);
         }
         if let Some(drag) = self.header_drag.take() {
@@ -530,6 +558,7 @@ impl Browser {
     }
 
     fn settings_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let seconds = |ms: u64| format!("{:.1} 秒", ms as f32 / 1000.);
         let hover = self.settings.drag_hover;
         let choice = |id: &'static str, label: &str, value: DragHover, cx: &mut Context<Self>| {
             Self::menu_item(id.into(), label.into(), hover == value)
@@ -545,6 +574,35 @@ impl Browser {
         vec![
             choice("hover-open", "ドラッグで止まると開く", DragHover::Open, cx),
             choice("hover-popup", "ドラッグで止まると小窓", DragHover::Popup, cx),
+            Self::menu_item("spring-first".into(), format!("最初に開くまで: {}", seconds(self.settings.spring_first_ms)), false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings.spring_first_ms = next_spring_delay(this.settings.spring_first_ms);
+                    this.save_settings();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Self::menu_item("spring-next".into(), format!("次に開くまで: {}", seconds(self.settings.spring_next_ms)), false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings.spring_next_ms = next_spring_delay(this.settings.spring_next_ms);
+                    this.save_settings();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            div().my_1().h(px(1.)).bg(rgb(theme::LINE)).into_any_element(),
+            Self::menu_item("long-fade".into(), "長い名前を薄く消す".into(), self.settings.long_name == LongName::Fade)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings.long_name = LongName::Fade;
+                    this.save_settings();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Self::menu_item("long-scroll".into(), "長い名前を流して見せる".into(), self.settings.long_name == LongName::Scroll)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings.long_name = LongName::Scroll;
+                    this.save_settings();
+                    cx.notify();
+                }))
+                .into_any_element(),
             div().my_1().h(px(1.)).bg(rgb(theme::LINE)).into_any_element(),
             Self::menu_item("whole-cell".into(), "アイコンの選択を全体で示す".into(), whole_cell)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -586,6 +644,7 @@ impl Browser {
             |name| name.to_string_lossy().into_owned(),
         );
         let (back, forward, up) = (self.history.can_go_back(), self.history.can_go_forward(), current.parent().is_some());
+        let parent_folder = current.parent().map(PathBuf::from);
         let active = self.active_view();
         let sort = format!("並べ替え: {} ▾", active.order.key.label());
         let group = format!("グループ: {} ▾", active.group.label());
@@ -599,9 +658,28 @@ impl Browser {
             .bg(rgb(theme::BAR))
             .border_b_1()
             .border_color(rgb(theme::LINE))
-            .child(Self::tool_button("back", "‹", back).when(back, |b| b.on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+            .child(Self::tool_button("back", "‹", back).when(back, |b| {
+                b.on_click(cx.listener(|this, _, _, cx| this.back(cx))).on_drag_move::<ExternalPaths>(cx.listener(
+                    |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                        this.hover_target(SpringTarget::Back, event.bounds, event.event.position, cx);
+                    },
+                ))
+            }))
             .child(Self::tool_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx)))))
-            .child(Self::tool_button("parent", "↑", up).when(up, |b| b.on_click(cx.listener(|this, _, _, cx| this.parent(cx)))))
+            .child(Self::tool_button("parent", "↑", up).when(up, |b| {
+                let target = parent_folder.clone();
+                b.on_click(cx.listener(|this, _, _, cx| this.parent(cx)))
+                    .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                        this.hover_target(SpringTarget::Parent, event.bounds, event.event.position, cx);
+                    }))
+                    .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                        cx.stop_propagation();
+                        let copy = window.modifiers().control;
+                        if let Some(target) = target.clone() {
+                            this.drop_paths(paths.paths(), target, copy, cx);
+                        }
+                    }))
+            }))
             .child(div().flex_1().min_w_0().px_2().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(self.menu_button("sort", sort, Menu::Sort, cx))
             .child(self.menu_button("group", group, Menu::Group, cx))
@@ -622,6 +700,7 @@ impl Browser {
 
     fn sidebar_item(&self, id: String, label: String, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = self.history.current() == path;
+        let (hover_path, drop_path) = (path.clone(), path.clone());
         div()
             .id(gpui::ElementId::Name(id.into()))
             .px_2()
@@ -634,6 +713,15 @@ impl Browser {
             .when(active, |b| b.bg(rgb(theme::HOVER)))
             .hover(|s| s.bg(rgb(theme::HOVER)))
             .child(label)
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
+            .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                this.hover_target(SpringTarget::Go(hover_path.clone()), event.bounds, event.event.position, cx);
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                let copy = window.modifiers().control;
+                this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
+            }))
             .on_click(cx.listener(move |this, _, _, cx| this.navigate(path.clone(), cx)))
     }
 
@@ -667,12 +755,14 @@ impl Browser {
             .flex()
             .flex_col()
             .flex_none()
+            .h_full()
             .w(px(theme::SIDEBAR_WIDTH))
             .p_2()
             .bg(rgb(theme::SIDEBAR))
             .border_r_1()
             .border_color(rgb(theme::LINE))
             .overflow_y_scroll()
+            .track_scroll(&self.sidebar_scroll)
             .child(Self::sidebar_heading("よく使う項目"))
             .children(favorites)
             .child(Self::sidebar_heading("場所"))
@@ -680,6 +770,7 @@ impl Browser {
     }
 
     fn status(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let icon_size = (self.view.mode == ViewMode::Icons).then(|| self.icon_size_control(cx));
         let pane = self.pane.read(cx);
         let state = &pane.state;
         let count = state.entries.len();
@@ -696,6 +787,7 @@ impl Browser {
             .border_color(rgb(theme::LINE))
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .text_color(rgb(theme::SUB_TEXT))
+            .children(icon_size)
             .children(self.message.clone().map(|message| div().flex_none().text_color(rgb(theme::ERROR_TEXT)).child(message)))
             .child(div().flex_none().child(if state.loading {
                 format!("読み込み中… {count} 項目")
@@ -709,6 +801,11 @@ impl Browser {
             }))
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(state.path.display().to_string()))
     }
+}
+
+/// ドラッグの移動かコピーかの判断に使う、パスのドライブ部分。
+fn volume_of(path: &Path) -> String {
+    path.components().next().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
 fn window_handle(window: &Window) -> isize {
@@ -747,7 +844,10 @@ impl Render for Browser {
         let sidebar = self.sidebar(cx);
         let status = self.status(cx);
         let menu = self.open_menu(cx);
-        let drag_popup = self.drag_popup_view(cx);
+        let drag_popups = self.drag_popup_views(cx);
+        let band = self.band_view();
+        let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
+        gpui::set_drop_volume(&volume_of(self.history.current()));
         div()
             .relative()
             .flex()
@@ -775,9 +875,13 @@ impl Render for Browser {
                 }),
             )
             .child(toolbar)
-            .child(div().flex().flex_1().min_h_0().child(sidebar).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
+            .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                this.keep_popups(event.event.position, cx);
+            }))
+            .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
             .child(status)
+            .children(band)
             .children(menu)
-            .children(drag_popup)
+            .children(drag_popups)
     }
 }

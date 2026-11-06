@@ -11,7 +11,7 @@ use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, 
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFO, DefSubclassProc, GCS_VERBA, IContextMenu,
+    CMF_CANRENAME, CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFO, DefSubclassProc, GCS_VERBA, IContextMenu,
     IContextMenu2, IContextMenu3, IDragSourceHelper, ILFindLastID, IShellFolder, RemoveWindowSubclass, SHBindToParent,
     SHDRAGIMAGE, SHGetDesktopFolder, SHParseDisplayName, SetWindowSubclass,
 };
@@ -106,7 +106,7 @@ fn command_verb(menu: &IContextMenu, index: usize) -> Option<String> {
 fn track(hwnd: HWND, menu: &IContextMenu) -> Result<MenuChoice> {
     unsafe {
         let popup = CreatePopupMenu()?;
-        menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, CMF_NORMAL | CMF_EXPLORE).ok()?;
+        menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME).ok()?;
         let mut point = POINT::default();
         GetCursorPos(&mut point)?;
         let _ = SetForegroundWindow(hwnd);

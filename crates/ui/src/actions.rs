@@ -2,17 +2,18 @@
 
 use crate::browser::Browser;
 use crate::icon_cache::SMALL;
+use crate::icons_view::{GridRow, grid_metrics};
 use crate::list_tree::{Flattened, Row, group_range};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use filer_core::{DragHover, Entry, ViewMode};
+use filer_core::{DragHover, Entry, ViewMode, rows_in_band};
 use filer_shell::{
     MenuChoice, Operation, Prompt, clipboard_files, drag_items, init_thread, open_path, remove_ime_caret, run_recording_undo,
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
     Bounds, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, prelude::*, px, rgb,
+    Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 use crate::folder_pane::FolderPane;
 use std::collections::{HashMap, HashSet};
@@ -34,9 +35,20 @@ pub struct RowPress {
     path: PathBuf,
 }
 
-/// ドラッグ中に止まっているフォルダ。時間が来たら開く。
+/// ドラッグ中に止まると開く先。
+#[derive(Clone, PartialEq, Eq)]
+pub enum SpringTarget {
+    /// 一覧の中のフォルダ
+    Folder(PathBuf),
+    /// サイドバーの項目
+    Go(PathBuf),
+    Back,
+    Parent,
+}
+
+/// ドラッグ中に止まっている先。時間が来たら開く。
 pub struct Spring {
-    path: PathBuf,
+    target: SpringTarget,
     _task: Task<()>,
 }
 
@@ -44,7 +56,23 @@ pub struct Spring {
 pub struct DragPopup {
     path: PathBuf,
     pane: Entity<FolderPane>,
-    position: Point<Pixels>,
+    origin: Point<Pixels>,
+    /// この小窓を開いたフォルダの行
+    anchor: Bounds<Pixels>,
+    bounds: Option<Bounds<Pixels>>,
+}
+
+/// 範囲選択の最中の状態。始点はスクロールしても動かないよう、中身の座標で持つ。
+pub struct Band {
+    start: Point<Pixels>,
+    current: Point<Pixels>,
+    column: Option<usize>,
+    base: Vec<PathBuf>,
+}
+
+struct BandViewport {
+    origin: Point<Pixels>,
+    scroll: Pixels,
 }
 
 /// 2つのパスが同じドライブ（または共有）にあるか。
@@ -196,7 +224,8 @@ impl Browser {
             let spring_path = drop_path.clone();
             row.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
                 .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    this.hover_folder(&spring_path, event.bounds, event.event.position, cx);
+                    let target = SpringTarget::Folder(spring_path.clone());
+                    this.hover_target(target, event.bounds, event.event.position, cx);
                 }))
                 .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                     cx.stop_propagation();
@@ -390,10 +419,15 @@ impl Browser {
         }
     }
 
-    /// ドラッグ中にフォルダの上で止まったら、少し待って開く。
-    pub fn hover_folder(&mut self, path: &Path, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+    /// ドラッグ中に、開く先の上で止まったら少し待って開く。
+    pub fn hover_target(&mut self, target: SpringTarget, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
         let inside = bounds.contains(&position);
-        let current = self.spring.as_ref().is_some_and(|spring| spring.path == path);
+        if let SpringTarget::Folder(path) = &target
+            && self.drag_popups.iter().any(|popup| popup.path == *path)
+        {
+            return;
+        }
+        let current = self.spring.as_ref().is_some_and(|spring| spring.target == target);
         if inside == current {
             return;
         }
@@ -401,34 +435,70 @@ impl Browser {
             self.spring = None;
             return;
         }
-        let target = path.to_path_buf();
+        let delay = if self.springs_done == 0 { self.settings.spring_first_ms } else { self.settings.spring_next_ms };
+        let fired = target.clone();
         let task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(theme::SPRING_DELAY_MS)).await;
-            let _ = this.update(cx, |browser, cx| browser.open_hovered(target, position, cx));
+            cx.background_executor().timer(Duration::from_millis(delay)).await;
+            let _ = this.update(cx, |browser, cx| browser.open_hovered(fired, bounds, position, cx));
         });
-        self.spring = Some(Spring { path: path.to_path_buf(), _task: task });
+        self.spring = Some(Spring { target, _task: task });
     }
 
-    fn open_hovered(&mut self, path: PathBuf, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn open_hovered(&mut self, target: SpringTarget, anchor: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.spring = None;
         if !cx.has_active_drag() {
             return;
         }
-        match (self.view.mode, self.settings.drag_hover) {
-            (ViewMode::Columns, _) => self.open_column_for(&path, cx),
-            (_, DragHover::Popup) => {
-                let pane = self.new_pane(path.clone(), self.view.order, false, cx);
-                self.drag_popup = Some(DragPopup { path, pane, position });
-            }
-            (ViewMode::List, DragHover::Open) => {
-                if !self.expanded.contains_key(&path) {
-                    let pane = self.new_pane(path.clone(), self.view.order, false, cx);
-                    self.expanded.insert(path, pane);
+        self.springs_done += 1;
+        match target {
+            SpringTarget::Back => self.back(cx),
+            SpringTarget::Parent => self.parent(cx),
+            SpringTarget::Go(path) => self.navigate(path, cx),
+            SpringTarget::Folder(path) => match (self.view.mode, self.settings.drag_hover) {
+                (ViewMode::Columns, _) => self.open_column_for(&path, cx),
+                (_, DragHover::Popup) => self.open_popup(path, anchor, position, cx),
+                (ViewMode::List, DragHover::Open) => {
+                    if !self.expanded.contains_key(&path) {
+                        let pane = self.new_pane(path.clone(), self.view.order, false, cx);
+                        self.expanded.insert(path, pane);
+                    }
                 }
-            }
-            (ViewMode::Icons, DragHover::Open) => self.navigate(path, cx),
+                (ViewMode::Icons, DragHover::Open) => self.navigate(path, cx),
+            },
         }
         cx.notify();
+    }
+
+    /// 小窓を開く。小窓の中のフォルダなら、親の小窓の右に重ねて開く。
+    fn open_popup(&mut self, path: PathBuf, anchor: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let parent = self.drag_popups.iter().position(|popup| Some(popup.path.as_path()) == path.parent());
+        self.drag_popups.truncate(parent.map_or(0, |index| index + 1));
+        let origin = match parent {
+            Some(index) => {
+                let right = self.drag_popups[index].bounds.map_or(position.x, |bounds| bounds.right());
+                point(right + px(theme::DRAG_POPUP_GAP), anchor.top())
+            }
+            None => position + point(px(theme::DRAG_POPUP_OFFSET), px(theme::DRAG_POPUP_OFFSET)),
+        };
+        let pane = self.new_pane(path.clone(), self.view.order, false, cx);
+        self.drag_popups.push(DragPopup { path, pane, origin, anchor, bounds: None });
+    }
+
+    /// カーソルが離れた小窓を閉じる。親の小窓の上にいる間は、親は残す。
+    pub fn keep_popups(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.drag_popups.is_empty() {
+            return;
+        }
+        let margin = px(theme::DRAG_POPUP_OFFSET);
+        let over = |popup: &DragPopup| {
+            popup.anchor.contains(&position) || popup.bounds.is_none_or(|bounds| bounds.dilate(margin).contains(&position))
+        };
+        let keep = self.drag_popups.iter().rposition(over).map_or(0, |index| index + 1);
+        if keep != self.drag_popups.len() {
+            self.drag_popups.truncate(keep);
+            self.spring = None;
+            cx.notify();
+        }
     }
 
     fn open_column_for(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -441,19 +511,16 @@ impl Browser {
         self.select_in_column(column, name.to_os_string(), entry, cx);
     }
 
-    /// ドラッグの終わりに、待っているフォルダの開閉と小窓を片付ける。
+    /// ドラッグの終わりに、待っている開閉と小窓を片付ける。
     pub fn end_spring(&mut self) {
         self.spring = None;
-        self.drag_popup = None;
+        self.springs_done = 0;
+        self.drag_popups.clear();
     }
 
-    /// ドラッグ中に出すフォルダの中身の小窓。
-    pub fn drag_popup_view(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if self.drag_popup.is_some() && !cx.has_active_drag() {
-            self.drag_popup = None;
-        }
-        let popup = self.drag_popup.as_ref()?;
-        let (folder, position) = (popup.path.clone(), popup.position);
+    fn popup_panel(&mut self, level: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let popup = &self.drag_popups[level];
+        let (folder, origin) = (popup.path.clone(), popup.origin);
         let entries: Vec<Entry> = popup.pane.read(cx).state.entries.clone();
         let more = entries.len().saturating_sub(theme::DRAG_POPUP_ROWS);
         let rows: Vec<_> = entries
@@ -464,7 +531,7 @@ impl Browser {
                 let path = folder.join(entry.os_name());
                 let icon = self.icons.update(cx, |icons, _| icons.get(&folder, entry, SMALL));
                 let row = div()
-                    .id(("popup-row", ix))
+                    .id(ix)
                     .flex()
                     .items_center()
                     .gap_1()
@@ -477,38 +544,135 @@ impl Browser {
             .collect();
         let title = folder.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let target = folder.clone();
-        let offset = px(theme::DRAG_POPUP_OFFSET);
+        div()
+            .id(("drag-popup", level))
+            .absolute()
+            .left(origin.x)
+            .top(origin.y)
+            .w(px(theme::DRAG_POPUP_WIDTH))
+            .py_1()
+            .rounded_md()
+            .bg(rgb(theme::BACKGROUND))
+            .border_1()
+            .border_color(rgb(theme::LINE))
+            .shadow_md()
+            .occlude()
+            .child(div().px_2().pb_1().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+            .children(rows)
+            .when(more > 0, |panel| panel.child(div().px_2().text_color(rgb(theme::SUB_TEXT)).child(format!("ほか {more} 項目"))))
+            .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, _| {
+                if let Some(popup) = this.drag_popups.get_mut(level) {
+                    popup.bounds = Some(event.bounds);
+                }
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                let copy = window.modifiers().control;
+                this.drop_paths(paths.paths(), target.clone(), copy, cx);
+            }))
+    }
+
+    /// ドラッグ中に出すフォルダの中身の小窓。
+    pub fn drag_popup_views(&mut self, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
+        if !self.drag_popups.is_empty() && !cx.has_active_drag() {
+            self.end_spring();
+        }
+        (0..self.drag_popups.len()).map(|level| self.popup_panel(level, cx)).collect()
+    }
+
+    /// 余白を押した時に、範囲選択を始める。
+    pub fn begin_band(&mut self, position: Point<Pixels>, column: Option<usize>, control: bool, cx: &Context<Self>) {
+        let Some(view) = self.band_viewport(column) else { return };
+        let start = point(position.x - view.origin.x, position.y - view.origin.y - view.scroll);
+        let base = if control { self.selection.paths() } else { Vec::new() };
+        self.band = Some(Band { start, current: position, column, base });
+        let _ = cx;
+    }
+
+    fn band_viewport(&self, column: Option<usize>) -> Option<BandViewport> {
+        let (origin, scroll) = match self.view.mode {
+            ViewMode::List => {
+                let handle = self.list_scroll.0.borrow().base_handle.clone();
+                (handle.bounds().origin, handle.offset().y)
+            }
+            ViewMode::Columns => {
+                let handle = self.columns.get(column?)?.scroll.0.borrow().base_handle.clone();
+                (handle.bounds().origin, handle.offset().y)
+            }
+            ViewMode::Icons => (self.grid_list.viewport_bounds().origin, self.grid_list.scroll_px_offset_for_scrollbar().y),
+        };
+        Some(BandViewport { origin, scroll })
+    }
+
+    pub fn drag_band(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(band) = &mut self.band else { return };
+        band.current = event.position;
+        let (column, start, base) = (band.column, band.start, band.base.clone());
+        let Some(view) = self.band_viewport(column) else { return };
+        let end = point(event.position.x - view.origin.x, event.position.y - view.origin.y - view.scroll);
+        let hits = match self.view.mode {
+            ViewMode::Icons => self.grid_hits(start, end, cx),
+            ViewMode::List | ViewMode::Columns => {
+                if let Some(column) = column {
+                    self.active_column = column;
+                }
+                let tree = self.active_tree(cx);
+                let rows = rows_in_band(start.y.into(), end.y.into(), theme::ROW_HEIGHT, tree.rows.len());
+                let items = self.visible_items(cx).into_iter();
+                items.filter(|(ix, _)| rows.contains(ix)).map(|(_, path)| path).collect()
+            }
+        };
+        self.selection.select_all(&[base, hits].concat());
+        cx.notify();
+    }
+
+    /// アイコン表示で枠に触れている項目。
+    fn grid_hits(&self, start: Point<Pixels>, end: Point<Pixels>, cx: &Context<Self>) -> Vec<PathBuf> {
+        let Some(data) = &self.grid_data else { return Vec::new() };
+        let (cell_width, row_height) = grid_metrics(self.view.icon_size);
+        let (left, right): (f32, f32) = (start.x.min(end.x).into(), start.x.max(end.x).into());
+        let (top, bottom): (f32, f32) = (start.y.min(end.y).into(), start.y.max(end.y).into());
+        let state = &self.pane.read(cx).state;
+        let mut hits = Vec::new();
+        let mut y = 0.0;
+        for row in data.rows.iter() {
+            match row {
+                GridRow::Header { .. } => y += theme::ROW_HEIGHT,
+                GridRow::Cells(cells) => {
+                    if y < bottom && y + row_height > top {
+                        for (index, &entry) in cells.iter().enumerate() {
+                            let x = theme::GRID_SIDE_PADDING + index as f32 * cell_width;
+                            if x < right && x + cell_width > left
+                                && let Some(entry) = state.entries.get(entry as usize)
+                            {
+                                hits.push(state.path.join(entry.os_name()));
+                            }
+                        }
+                    }
+                    y += row_height;
+                }
+            }
+        }
+        hits
+    }
+
+    /// 範囲選択の枠。
+    pub fn band_view(&self) -> Option<impl IntoElement + use<>> {
+        let band = self.band.as_ref()?;
+        let view = self.band_viewport(band.column)?;
+        let start = point(band.start.x + view.origin.x, band.start.y + view.origin.y + view.scroll);
+        let (x0, x1) = (start.x.min(band.current.x), start.x.max(band.current.x));
+        let (y0, y1) = (start.y.min(band.current.y), start.y.max(band.current.y));
         Some(
             div()
-                .id("drag-popup")
                 .absolute()
-                .left(position.x + offset)
-                .top(position.y + offset)
-                .w(px(theme::DRAG_POPUP_WIDTH))
-                .py_1()
-                .rounded_md()
-                .bg(rgb(theme::BACKGROUND))
+                .left(x0)
+                .top(y0)
+                .w(x1 - x0)
+                .h(y1 - y0)
+                .bg(rgba(theme::BAND_FILL))
                 .border_1()
-                .border_color(rgb(theme::LINE))
-                .shadow_md()
-                .occlude()
-                .child(div().px_2().pb_1().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
-                .children(rows)
-                .when(more > 0, |panel| {
-                    panel.child(div().px_2().text_color(rgb(theme::SUB_TEXT)).child(format!("ほか {more} 項目")))
-                })
-                .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let margin = px(theme::DRAG_POPUP_OFFSET * 2.);
-                    if !event.bounds.dilate(margin).contains(&event.event.position) {
-                        this.drag_popup = None;
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                    cx.stop_propagation();
-                    let copy = window.modifiers().control;
-                    this.drop_paths(paths.paths(), target.clone(), copy, cx);
-                })),
+                .border_color(rgb(theme::BAND_LINE)),
         )
     }
 

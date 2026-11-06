@@ -862,6 +862,35 @@ impl PlatformWindow for WindowsWindow {
     }
 }
 
+thread_local! {
+    static DROP_VOLUME: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static DRAG_VOLUME: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// filer: 今のフォルダのドライブを伝える。同じドライブからのドラッグは移動の表示にする。
+pub fn set_drop_volume(volume: &str) {
+    DROP_VOLUME.with_borrow_mut(|current| {
+        current.clear();
+        current.push_str(volume);
+    });
+}
+
+fn volume_of(path: &std::path::Path) -> String {
+    path.components().next().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+/// filer: 上流は常にコピーの表示を返していた。表示だけを変え、ドロップの結果はコピーのまま返す。
+/// 移動を返すと、ドラッグ元も元のファイルを消そうとするため。
+fn shown_effect(allowed: DROPEFFECT, keys: MODIFIERKEYS_FLAGS) -> DROPEFFECT {
+    use windows::Win32::System::SystemServices::MK_CONTROL;
+    let same_volume = DROP_VOLUME.with_borrow(|target| DRAG_VOLUME.with_borrow(|source| target == source));
+    if same_volume && keys.0 & MK_CONTROL.0 == 0 && allowed.0 & DROPEFFECT_MOVE.0 != 0 {
+        DROPEFFECT_MOVE
+    } else {
+        DROPEFFECT_COPY
+    }
+}
+
 #[implement(IDropTarget)]
 struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
 
@@ -881,7 +910,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     fn DragEnter(
         &self,
         pdataobj: windows::core::Ref<IDataObject>,
-        _grfkeystate: MODIFIERKEYS_FLAGS,
+        grfkeystate: MODIFIERKEYS_FLAGS,
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
@@ -896,6 +925,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             };
             let cursor_position = POINT { x: pt.x, y: pt.y };
             if idata_obj.QueryGetData(&config as _) == S_OK {
+                let allowed = *pdweffect;
                 *pdweffect = DROPEFFECT_COPY;
                 let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
                     return Ok(());
@@ -913,6 +943,10 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                     }
                 });
                 ReleaseStgMedium(&mut idata);
+                DRAG_VOLUME.with_borrow_mut(|volume| {
+                    *volume = paths.first().map(|path| volume_of(path)).unwrap_or_default();
+                });
+                *pdweffect = shown_effect(allowed, grfkeystate);
                 let mut cursor_position = cursor_position;
                 ScreenToClient(self.0.hwnd, &mut cursor_position)
                     .ok()
@@ -940,13 +974,13 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 
     fn DragOver(
         &self,
-        _grfkeystate: MODIFIERKEYS_FLAGS,
+        grfkeystate: MODIFIERKEYS_FLAGS,
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
-            *pdweffect = DROPEFFECT_COPY;
+            *pdweffect = shown_effect(*pdweffect, grfkeystate);
             self.0
                 .drop_target_helper
                 .DragOver(&cursor_position, *pdweffect)

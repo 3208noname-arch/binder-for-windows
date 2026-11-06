@@ -13,6 +13,7 @@ mod system_settings;
 mod util;
 mod vsync;
 mod window;
+pub use window::set_drop_volume;
 mod wrapper;
 
 pub(crate) use clipboard::*;

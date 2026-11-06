@@ -81,6 +81,8 @@ pub use semantic_version::SemanticVersion;
 pub(crate) use test::*;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;
+#[cfg(target_os = "windows")]
+pub use windows::set_drop_volume;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};

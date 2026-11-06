@@ -1,6 +1,7 @@
 use crate::browser::{Browser, Column, Resize};
 use crate::icon_cache::{LARGE, SMALL};
 use crate::list_tree::{Flattened, Row};
+use crate::scrollbar::ScrollTarget;
 use crate::theme;
 use filer_core::{Entry, fit_width, format_size, kind_of};
 use filer_shell::format_time;
@@ -196,6 +197,7 @@ impl Browser {
                 .into_any_element()
             }
         };
+        let bar = self.scrollbar(Self::column_bar_id(column), ScrollTarget::Column(column), true, 0., cx);
         let handle = div()
             .id(("column-handle", column))
             .absolute()
@@ -224,9 +226,10 @@ impl Browser {
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::LINE))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
                 this.clear_column(column, cx);
+                this.begin_band(event.position, Some(column), false, cx);
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
                 this.active_column = column;
@@ -239,6 +242,7 @@ impl Browser {
                 this.drop_paths(paths.paths(), target, copy, cx);
             }))
             .child(body)
+            .children(bar)
             .child(handle)
     }
 
@@ -275,6 +279,7 @@ impl Browser {
     pub fn render_columns(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let columns: Vec<_> = (0..self.columns.len()).map(|i| self.column_list(i, cx)).collect();
         let preview = self.preview_panel(cx);
+        let bar = self.scrollbar("columns-bar", ScrollTarget::Columns, false, 0., cx);
         let mut strip = div()
             .id("columns")
             .flex()
@@ -286,6 +291,12 @@ impl Browser {
             .children(preview);
         // 列の縦スクロールで、並び全体まで横に動かないようにする
         strip.style().restrict_scroll_to_axis = Some(true);
-        strip
+        div().relative().flex().flex_1().min_h_0().child(strip).children(bar)
+    }
+
+    /// 列ごとのスクロールバーの名前。列は多くならないので、固定の名前で足りる。
+    fn column_bar_id(column: usize) -> &'static str {
+        const IDS: [&str; 8] = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"];
+        IDS[column.min(IDS.len() - 1)]
     }
 }

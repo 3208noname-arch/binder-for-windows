@@ -3612,7 +3612,9 @@ impl Window {
                 self.capslock = modifiers_changed.capslock;
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
-            PlatformInput::ScrollWheel(scroll_wheel) => {
+            PlatformInput::ScrollWheel(mut scroll_wheel) => {
+                // filer: 上流は縦と横の入れ物が別々に動くので、斜めに動いてしまう
+                scroll_wheel.delta = lock_scroll_axis(scroll_wheel.delta);
                 self.mouse_position = scroll_wheel.position;
                 self.modifiers = scroll_wheel.modifiers;
                 PlatformInput::ScrollWheel(scroll_wheel)
@@ -5099,5 +5101,31 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
+    }
+}
+
+thread_local! {
+    static SCROLL_AXIS: std::cell::Cell<Option<(bool, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+}
+
+/// filer: 一連のスクロールの間は、最初に動いた軸だけを動かす。
+fn lock_scroll_axis(delta: crate::ScrollDelta) -> crate::ScrollDelta {
+    use crate::ScrollDelta;
+    const HOLD: std::time::Duration = std::time::Duration::from_millis(150);
+    let (x, y) = match delta {
+        ScrollDelta::Pixels(p) => (f32::from(p.x).abs(), f32::from(p.y).abs()),
+        ScrollDelta::Lines(p) => (p.x.abs(), p.y.abs()),
+    };
+    let now = std::time::Instant::now();
+    let horizontal = match SCROLL_AXIS.get() {
+        Some((axis, time)) if now - time < HOLD => axis,
+        _ => x > y,
+    };
+    SCROLL_AXIS.set(Some((horizontal, now)));
+    match delta {
+        ScrollDelta::Pixels(p) if horizontal => ScrollDelta::Pixels(point(p.x, px(0.))),
+        ScrollDelta::Pixels(p) => ScrollDelta::Pixels(point(px(0.), p.y)),
+        ScrollDelta::Lines(p) if horizontal => ScrollDelta::Lines(point(p.x, 0.)),
+        ScrollDelta::Lines(p) => ScrollDelta::Lines(point(0., p.y)),
     }
 }

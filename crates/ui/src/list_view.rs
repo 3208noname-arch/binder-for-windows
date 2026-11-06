@@ -2,6 +2,7 @@ use crate::browser::{Browser, HeaderDrag, Menu, Resize, TreeKey};
 use crate::folder_pane::tree_for;
 use crate::icon_cache::SMALL;
 use crate::list_tree::{Flattened, Row};
+use crate::scrollbar::ScrollTarget;
 use crate::theme;
 use filer_core::{Entry, Field, fit_width, format_size, kind_of};
 use filer_shell::{format_time, today};
@@ -360,15 +361,20 @@ impl Browser {
         // 1回の描画で何度も呼ばれるので、行の並びは1回だけ作る
         let tree = self.tree(cx);
         let count = tree.rows.len();
+        let vertical_bar = self.scrollbar("list-bar", ScrollTarget::List, true, theme::ROW_HEIGHT, cx);
+        let horizontal_bar = self.scrollbar("list-columns-bar", ScrollTarget::ListColumns, false, 0., cx);
         let mut strip = div()
             .id("list-strip")
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
             .track_scroll(&self.list_columns_scroll)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
-                this.clear_selection(cx);
+                if !event.modifiers.control {
+                    this.clear_selection(cx);
+                }
+                this.begin_band(event.position, None, event.modifiers.control, cx);
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.folder_menu(cx)))
             .child(
@@ -385,6 +391,6 @@ impl Browser {
                 ),
             );
         strip.style().restrict_scroll_to_axis = Some(true);
-        strip
+        div().relative().flex_1().min_h_0().flex().flex_col().child(strip).children(vertical_bar).children(horizontal_bar)
     }
 }
