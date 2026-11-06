@@ -18,7 +18,7 @@ pub use enumerate::{FolderSize, ListEvent, ListJob, folder_size, long_path, shou
 pub use icons::{drives, favorites, init_thread, load_icon};
 pub use name_cmp::compare_names;
 pub use operations::{
-    Operation, Prompt, clipboard_files, inverse, open_path, run_operation, set_clipboard_files, unique_folder_name, valid_file_name,
+    Operation, Prompt, clipboard_files, inverse, open_path, run_operation, run_recording_undo, set_clipboard_files, unique_folder_name, valid_file_name,
 };
 pub use properties::{PropertiesJob, read_properties, start_properties};
 pub use time::{format_time, local_date, today};

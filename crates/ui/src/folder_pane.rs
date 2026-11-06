@@ -20,6 +20,7 @@ pub struct FolderPane {
     /// 中身が変わるたびに増える。行の並びの作り直しの判断に使う
     pub version: u64,
     wants_properties: bool,
+    reload_again: bool,
     job: Option<ListJob>,
     loader: Option<Task<()>>,
     properties_job: Option<PropertiesJob>,
@@ -79,6 +80,7 @@ impl FolderPane {
             properties: HashMap::new(),
             version: 0,
             wants_properties: false,
+            reload_again: false,
             job: None,
             loader: None,
             properties_job: None,
@@ -130,6 +132,7 @@ impl FolderPane {
         self.properties_job = None;
         self.properties_loader = None;
         self.version += 1;
+        self.reload_again = false;
         let generation = self.state.open(path.clone());
         self.watch(path.clone(), cx);
         self.start_listing(generation, path, cx);
@@ -137,6 +140,12 @@ impl FolderPane {
 
     /// 今のフォルダを読み直す。終わるまで今の一覧を見せ続ける。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        // 書き込みが続くフォルダでも一覧が終わるよう、読み終わってから読み直す
+        if self.state.loading {
+            self.reload_again = true;
+            return;
+        }
+        self.reload_again = false;
         self.properties_job = None;
         self.properties_loader = None;
         let generation = self.state.reload();
@@ -183,6 +192,10 @@ impl FolderPane {
                 cx.background_executor().timer(MERGE_INTERVAL).await;
             }
             let _ = this.update(cx, |pane, cx| {
+                if pane.reload_again {
+                    pane.reload(cx);
+                    return;
+                }
                 pane.start_properties(cx);
                 pane.finish_measure(cx);
             });

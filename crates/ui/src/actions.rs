@@ -6,7 +6,7 @@ use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use filer_core::{Entry, ViewMode};
 use filer_shell::{
-    Operation, Prompt, clipboard_files, drag_items, init_thread, inverse, open_path, remove_ime_caret, run_operation,
+    Operation, Prompt, clipboard_files, drag_items, init_thread, open_path, remove_ime_caret, run_recording_undo,
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
@@ -80,12 +80,43 @@ impl Browser {
         }
     }
 
+    /// 今読み込まれている項目のすべて。隠れている親の列も含む。
+    fn known_paths(&self, cx: &Context<Self>) -> Vec<PathBuf> {
+        let columns = self.columns.iter().map(|column| &column.pane);
+        let panes = std::iter::once(&self.pane).chain(self.expanded.values()).chain(columns);
+        let lists = panes.map(|pane| &pane.read(cx).state);
+        lists.flat_map(|state| state.entries.iter().map(|entry| state.path.join(entry.os_name()))).collect()
+    }
+
+    /// 消えた項目や、閉じたフォルダの中の項目を選択から外す。
+    /// 新規フォルダの一覧への反映を待って、名前の編集を始める。
+    pub fn sync_with_listing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.pane.read(cx);
+        let version = self.expanded.values().map(|pane| pane.read(cx).version).sum::<u64>()
+            + self.columns.iter().map(|column| column.pane.read(cx).version).sum::<u64>()
+            + root.version
+            + self.expanded.len() as u64;
+        if version == self.synced_version || root.state.loading {
+            return;
+        }
+        self.synced_version = version;
+        let known = self.known_paths(cx);
+        self.selection.retain_existing(&known);
+        if let Some(path) = self.pending_rename.take_if(|path| known.contains(path)) {
+            self.selection.select_only(path.clone());
+            self.begin_rename(path, window, cx);
+        }
+    }
+
     fn ordered_paths(&mut self, cx: &Context<Self>) -> Vec<PathBuf> {
         self.visible_items(cx).into_iter().map(|(_, path)| path).collect()
     }
 
     /// クリックでの選択。Ctrlは追加、Shiftは範囲。ダブルクリックは開く。
     pub fn click_item(&mut self, path: PathBuf, is_dir: bool, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.as_ref().is_some_and(|renaming| renaming.path == path) {
+            return;
+        }
         let modifiers = event.modifiers();
         if event.click_count() == 2 && !modifiers.control && !modifiers.shift {
             self.open_item(path, is_dir, cx);
@@ -169,7 +200,7 @@ impl Browser {
         let Some((folder, names)) = self.selection_in_folder_of(&press.path) else { return };
         let hwnd = self.hwnd;
         cx.notify();
-        cx.defer(move |_| {
+        Self::outside_update(cx, move || {
             if let Err(error) = drag_items(hwnd, &folder, &names) {
                 eprintln!("ドラッグを始められませんでした: {error}");
             }
@@ -178,6 +209,12 @@ impl Browser {
 
     pub fn end_press(&mut self) {
         self.press = None;
+    }
+
+    /// メニューやドラッグは独自のメッセージループを回す。その間に裏の処理が画面を更新できるよう、
+    /// gpuiの更新処理の外で動かす。`cx.defer` の中だと更新が重なって落ちる。
+    fn outside_update(cx: &mut Context<Self>, modal: impl FnOnce() + 'static) {
+        cx.spawn(async move |_, _| modal()).detach();
     }
 
     /// `path` と同じフォルダにある選択項目。シェルのメニューとドラッグは1フォルダ単位で動く。
@@ -200,7 +237,7 @@ impl Browser {
         let Some((folder, names)) = self.selection_in_folder_of(&path) else { return };
         let hwnd = self.hwnd;
         cx.notify();
-        cx.defer(move |_| {
+        Self::outside_update(cx, move || {
             if let Err(error) = show_items_menu(hwnd, &folder, &names) {
                 eprintln!("メニューを出せませんでした: {error}");
             }
@@ -210,7 +247,7 @@ impl Browser {
     /// 余白の右クリック。新規作成や貼り付けのメニュー。
     pub fn folder_menu(&mut self, cx: &mut Context<Self>) {
         let (hwnd, folder) = (self.hwnd, self.current_folder(cx));
-        cx.defer(move |_| {
+        Self::outside_update(cx, move || {
             if let Err(error) = show_folder_menu(hwnd, &folder) {
                 eprintln!("メニューを出せませんでした: {error}");
             }
@@ -237,7 +274,7 @@ impl Browser {
         let job = operation.clone();
         std::thread::spawn(move || {
             init_thread();
-            let _ = tx.send(run_operation(&job, Prompt::Windows { hwnd }));
+            let _ = tx.send(run_recording_undo(&job, Prompt::Windows { hwnd }));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("ファイル操作が途中で止まりました".to_string()));
@@ -246,11 +283,17 @@ impl Browser {
         .detach();
     }
 
-    fn finish_operation(&mut self, operation: &Operation, result: Result<(), String>, record_undo: bool, cx: &mut Context<Self>) {
+    fn finish_operation(&mut self, operation: &Operation, result: Result<Option<Operation>, String>, record_undo: bool, cx: &mut Context<Self>) {
         match result {
-            Ok(()) => {
-                if record_undo && let Some(undo) = inverse(operation) {
-                    self.undo.push(undo);
+            Ok(undo) => {
+                match undo {
+                    Some(undo) if record_undo => self.undo.push(undo),
+                    // 戻せない操作の後で、さらに前の操作を戻すと順番が崩れる
+                    None if record_undo => self.undo.clear(),
+                    _ => {}
+                }
+                if let Operation::NewFolder { parent, name } = operation {
+                    self.pending_rename = Some(parent.join(name));
                 }
                 self.message = None;
             }
@@ -275,7 +318,7 @@ impl Browser {
         if self.selection.is_empty() {
             return;
         }
-        if let Err(message) = set_clipboard_files(&self.selection.paths(), cut) {
+        if let Err(message) = set_clipboard_files(&self.selection.top_level(), cut) {
             self.show_message(message, cx);
         }
     }
@@ -289,17 +332,16 @@ impl Browser {
 
     fn recycle_selection(&mut self, cx: &mut Context<Self>) {
         if !self.selection.is_empty() {
-            let items = self.selection.paths();
+            let items = self.selection.top_level();
             self.selection.clear();
-            self.perform(Operation::Recycle { items }, false, cx);
+            self.perform(Operation::Recycle { items }, true, cx);
         }
     }
 
     fn new_folder(&mut self, cx: &mut Context<Self>) {
         let parent = self.current_folder(cx);
         let name = unique_folder_name(&parent);
-        self.pending_rename = Some(parent.join(&name));
-        self.perform(Operation::NewFolder { parent, name }, false, cx);
+        self.perform(Operation::NewFolder { parent, name }, true, cx);
     }
 
     /// 名前の編集を始める。拡張子を除いた部分を選んだ状態にする。
@@ -315,6 +357,9 @@ impl Browser {
             InputEvent::Cancel => this.end_rename(window, cx),
         });
         window.focus(&input.focus_handle(cx));
+        if let Some((row, _)) = self.visible_items(cx).iter().find(|(_, item)| *item == path) {
+            self.reveal(*row);
+        }
         self.renaming = Some(Renaming { path, input, _subscription: subscription });
         cx.notify();
     }
@@ -399,6 +444,10 @@ impl Browser {
             return;
         }
         let keystroke = &event.keystroke;
+        // 押しっぱなしで繰り返すのは移動だけにする
+        if event.is_held && !matches!(keystroke.key.as_str(), "up" | "down" | "left" | "right") {
+            return;
+        }
         let (control, shift, alt) = (keystroke.modifiers.control, keystroke.modifiers.shift, keystroke.modifiers.alt);
         let rows = if self.view.mode == ViewMode::Icons { self.grid_per_row as isize } else { 1 };
         let mode = self.view.mode;

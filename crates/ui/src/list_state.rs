@@ -50,6 +50,7 @@ impl ListState {
                 if let Some(mut incoming) = self.incoming.take() {
                     sort_entries(&mut incoming, self.order, compare_names);
                     self.entries = incoming;
+                    self.error = None;
                 }
                 self.loading = false;
             }
@@ -101,6 +102,16 @@ pub fn coalesce(events: Vec<ListEvent>) -> Vec<ListEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_reload_clears_old_error() {
+        let mut s = ListState::new("a".into());
+        let g = s.open("a".into());
+        s.apply(g, ListEvent::Failed("切断".into()));
+        let g = s.reload();
+        s.apply(g, ListEvent::Done);
+        assert_eq!(s.error, None);
+    }
 
     #[test]
     fn reload_keeps_rows_until_listing_ends() {

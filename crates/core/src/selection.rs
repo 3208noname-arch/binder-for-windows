@@ -22,6 +22,11 @@ impl Selection {
     pub fn paths(&self) -> Vec<PathBuf> {
         self.items.iter().cloned().collect()
     }
+    /// 選択中のフォルダの中にある項目を除いた一覧。ファイル操作に使う。
+    pub fn top_level(&self) -> Vec<PathBuf> {
+        let inside_selected = |path: &&PathBuf| path.ancestors().skip(1).any(|parent| self.items.contains(parent));
+        self.items.iter().filter(|path| !inside_selected(path)).cloned().collect()
+    }
     pub fn clear(&mut self) {
         *self = Self::default();
     }
@@ -142,6 +147,15 @@ mod tests {
         s.select_only("b".into());
         s.move_cursor(1, true, &list());
         assert_eq!(sorted(&s), ["b", "c"]);
+    }
+
+    #[test]
+    fn top_level_drops_items_inside_selected_folders() {
+        let mut s = Selection::default();
+        s.select_all(&["a".into(), Path::new("a").join("b"), "c".into()]);
+        let mut top: Vec<_> = s.top_level().iter().map(|p| p.display().to_string()).collect();
+        top.sort();
+        assert_eq!(top, ["a", "c"]);
     }
 
     #[test]

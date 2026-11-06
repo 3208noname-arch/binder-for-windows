@@ -87,6 +87,7 @@ pub struct Browser {
     pub press: Option<RowPress>,
     pub undo: Vec<Operation>,
     pub grid_per_row: usize,
+    pub synced_version: u64,
     pub list_scroll: UniformListScrollHandle,
     pub list_columns_scroll: ScrollHandle,
     pub grid_list: ListState,
@@ -152,6 +153,7 @@ impl Browser {
             press: None,
             undo: Vec::new(),
             grid_per_row: 1,
+            synced_version: 0,
             list_scroll: UniformListScrollHandle::new(),
             list_columns_scroll: ScrollHandle::new(),
             grid_list: ListState::new(0, ListAlignment::Top, px(theme::GRID_ROW_HEIGHT * 2.)),
@@ -653,10 +655,7 @@ fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_active = window.is_window_active();
-        if let Some(path) = self.pending_rename.take() {
-            self.selection.select_only(path.clone());
-            self.begin_rename(path, window, cx);
-        }
+        self.sync_with_listing(window, cx);
         let error = self.pane.read(cx).state.error.clone();
         let body = match (error, self.view.mode) {
             (Some(message), _) => div()

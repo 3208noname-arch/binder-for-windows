@@ -1,4 +1,4 @@
-use filer_shell::{Operation, Prompt, init_thread, inverse, run_operation, unique_folder_name, valid_file_name};
+use filer_shell::{Operation, Prompt, init_thread, inverse, run_operation, run_recording_undo, unique_folder_name, valid_file_name};
 use std::path::PathBuf;
 
 fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -109,6 +109,36 @@ fn copy_is_undone_by_recycling_the_copies() {
 fn recycle_and_same_folder_copy_cannot_be_undone() {
     assert_eq!(inverse(&Operation::Recycle { items: vec![r"C:\a".into()] }), None);
     let op = Operation::Copy { items: vec![r"C:\a\x".into()], destination: r"C:\a".into() };
+    assert_eq!(inverse(&op), None);
+}
+
+#[test]
+fn undo_is_offered_when_nothing_collided() {
+    let (_dir, file, target) = setup();
+    let op = Operation::Copy { items: vec![file], destination: target.clone() };
+    let undo = run_recording_undo(&op, Prompt::Silent).unwrap();
+    assert_eq!(undo, Some(Operation::Recycle { items: vec![target.join("素材.txt")] }));
+}
+
+#[test]
+fn collision_gives_no_undo() {
+    let (_dir, file, target) = setup();
+    std::fs::write(target.join("素材.txt"), "existing").unwrap();
+    let op = Operation::Copy { items: vec![file], destination: target };
+    assert_eq!(run_recording_undo(&op, Prompt::Silent).unwrap(), None);
+}
+
+#[test]
+fn rename_collision_gives_no_undo() {
+    let (dir, file, _target) = setup();
+    std::fs::write(dir.path().join("既存.txt"), "existing").unwrap();
+    let op = Operation::Rename { item: file, name: "既存.txt".into() };
+    assert_eq!(run_recording_undo(&op, Prompt::Silent).ok().flatten(), None);
+}
+
+#[test]
+fn same_folder_copy_ignores_case() {
+    let op = Operation::Copy { items: vec![r"C:\A\x".into()], destination: r"c:\a".into() };
     assert_eq!(inverse(&op), None);
 }
 

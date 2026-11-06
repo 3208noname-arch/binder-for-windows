@@ -12,7 +12,7 @@ use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, Glo
 use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::UI::Shell::{
     DROPFILES, DragQueryFileW, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR,
-    FOF_NOERRORUI, FOF_RENAMEONCOLLISION, FOF_SILENT, FOFX_RECYCLEONDELETE, FileOperation, HDROP, IFileOperation,
+    FOF_NOERRORUI, FOF_RENAMEONCOLLISION, FOF_SILENT, FOF_WANTNUKEWARNING, FOFX_RECYCLEONDELETE, FileOperation, HDROP, IFileOperation,
     IShellItem, SHCreateItemFromParsingName, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -66,7 +66,9 @@ fn shell_item(path: &Path) -> windows::core::Result<IShellItem> {
 
 fn same_folder_copy(operation: &Operation) -> bool {
     match operation {
-        Operation::Copy { items, destination } => items.iter().any(|item| item.parent() == Some(destination)),
+        Operation::Copy { items, destination } => {
+            items.iter().any(|item| item.parent().is_some_and(|parent| same_path(parent, destination)))
+        }
         _ => false,
     }
 }
@@ -110,13 +112,48 @@ fn queue(file_operation: &IFileOperation, operation: &Operation) -> windows::cor
 
 /// 操作を実行する。止めるまで戻らないので、裏のスレッドで呼ぶ。
 pub fn run_operation(operation: &Operation, prompt: Prompt) -> Result<(), String> {
-    run(operation, prompt).map_err(|error| error.message())
+    run(operation, prompt).map(|_| ()).map_err(|error| error.message())
 }
 
-fn run(operation: &Operation, prompt: Prompt) -> windows::core::Result<()> {
+/// 操作を実行し、確実に元へ戻せる時だけ取り消しの操作を返す。
+///
+/// 名前の衝突があると、スキップや上書きの結果を確かめられない。その時に戻そうとすると
+/// 別のファイルを動かすことになるので、取り消しを用意しない。
+pub fn run_recording_undo(operation: &Operation, prompt: Prompt) -> Result<Option<Operation>, String> {
+    let undo = if has_collision(operation) { None } else { inverse(operation) };
+    let aborted = run(operation, prompt).map_err(|error| error.message())?;
+    Ok(if aborted { None } else { undo })
+}
+
+/// 操作の先に、同じ名前の項目が既にあるか。
+fn has_collision(operation: &Operation) -> bool {
+    let exists_in = |items: &[PathBuf], destination: &Path| {
+        items.iter().filter_map(|item| item.file_name()).any(|name| destination.join(name).exists())
+    };
+    match operation {
+        Operation::Copy { items, destination } | Operation::Move { items, destination } => exists_in(items, destination),
+        // 大文字と小文字だけの変更は、同じ項目なので衝突ではない
+        Operation::Rename { item, name } => {
+            let target = item.with_file_name(name);
+            target.exists() && !same_path(&target, item)
+        }
+        Operation::Recycle { .. } | Operation::NewFolder { .. } => false,
+    }
+}
+
+/// Windowsのパスは大文字と小文字を区別しない。
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+}
+
+/// 実行する。利用者が途中で止めた、またはスキップした時は真を返す。
+fn run(operation: &Operation, prompt: Prompt) -> windows::core::Result<bool> {
     let mut flags = FOF_ALLOWUNDO.0 as u32 | FOFX_RECYCLEONDELETE.0;
     if prompt == Prompt::Silent {
         flags |= (FOF_SILENT.0 | FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_NOCONFIRMMKDIR.0) as u32;
+    } else {
+        // ごみ箱に入らない時は、完全に消す前に必ず確認を出す
+        flags |= FOF_WANTNUKEWARNING.0 as u32;
     }
     if same_folder_copy(operation) {
         flags |= FOF_RENAMEONCOLLISION.0 as u32;
@@ -128,7 +165,8 @@ fn run(operation: &Operation, prompt: Prompt) -> windows::core::Result<()> {
             file_operation.SetOwnerWindow(HWND(hwnd as *mut c_void))?;
         }
         queue(&file_operation, operation)?;
-        file_operation.PerformOperations()
+        file_operation.PerformOperations()?;
+        Ok(file_operation.GetAnyOperationsAborted()?.as_bool())
     }
 }
 
@@ -247,7 +285,8 @@ pub fn clipboard_files() -> Option<(Vec<PathBuf>, bool)> {
                 let pointer = GlobalLock(memory).cast::<u32>();
                 let value = if pointer.is_null() { 0 } else { pointer.read_unaligned() };
                 let _ = GlobalUnlock(memory);
-                value & 2 != 0
+                // 1はコピー、2は移動。両方を許す値は切り取りではない
+                value & 2 != 0 && value & 1 == 0
             });
             Some((paths, cut))
         })();
