@@ -14,26 +14,30 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// グループの見出しの行。
-pub fn group_header(id: impl Into<gpui::ElementId>, label: &str, count: usize) -> AnyElement {
-    div()
-        .id(id)
-        .flex()
-        .items_end()
-        .gap_2()
-        .w_full()
-        .h(px(theme::ROW_HEIGHT))
-        .px_3()
-        .pb_0p5()
-        .border_b_1()
-        .border_color(rgb(theme::LINE))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(label.to_string())
-        .child(div().text_color(rgb(theme::SUB_TEXT)).child(format!("（{count}）")))
-        .into_any_element()
-}
-
 impl Browser {
+    /// グループの見出しの行。押すとそのグループを全部選ぶ。
+    pub fn group_header(&self, id: usize, ordinal: usize, label: &str, count: usize, column: Option<usize>, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .h(px(theme::ROW_HEIGHT))
+            .px_3()
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(theme::LINE))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor(CursorStyle::PointingHand)
+            .hover(|s| s.bg(rgb(theme::HOVER)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| this.select_group(ordinal, column, window, cx)))
+            .child(label.to_string())
+            .child(div().text_color(rgb(theme::SUB_TEXT)).child(format!("（{count}）")))
+            .into_any_element()
+    }
+
     /// 今の行の並び。開いているフォルダの子を親の下へ展開する。中身が変わるまでは作り直さない。
     pub fn tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
         let root = self.pane.read(cx);
@@ -271,6 +275,7 @@ impl Browser {
             .size_full()
             .items_center()
             .gap_1()
+            .when(self.is_cut(path), |cell| cell.opacity(theme::CUT_OPACITY))
             .pl(px(depth as f32 * theme::INDENT))
             .child(disclosure)
             .child(self.icon(icon, is_dir, theme::ROW_ICON))
@@ -324,7 +329,10 @@ impl Browser {
     fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         range
             .filter_map(|ix| match tree.rows.get(ix)? {
-                Row::Header { label, count } => Some(group_header(ix, label, *count)),
+                Row::Header { label, count } => {
+                    let ordinal = tree.rows[..ix].iter().filter(|row| matches!(row, Row::Header { .. })).count();
+                    Some(self.group_header(ix, ordinal, label, *count, None, cx))
+                }
                 Row::Item(row) => {
                     let folder = &tree.folders[row.folder as usize];
                     let entry = self.list_entry(folder, row.entry as usize, cx)?;

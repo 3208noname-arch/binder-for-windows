@@ -1,12 +1,11 @@
 use crate::browser::{Browser, Column, Resize};
 use crate::icon_cache::{LARGE, SMALL};
 use crate::list_tree::{Flattened, Row};
-use crate::list_view::group_header;
 use crate::theme;
 use filer_core::{Entry, fit_width, format_size, kind_of};
 use filer_shell::format_time;
 use gpui::{
-    ClickEvent, Context, CursorStyle, MouseButton, MouseDownEvent, Point, UniformListScrollHandle, Window, div,
+    ClickEvent, Context, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, Point, UniformListScrollHandle, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
 use std::ffi::OsString;
@@ -130,7 +129,10 @@ impl Browser {
         range
             .filter_map(|ix| {
                 let row = match tree.rows.get(ix)? {
-                    Row::Header { label, count } => return Some(group_header(ix, label, *count)),
+                    Row::Header { label, count } => {
+                        let ordinal = tree.rows[..ix].iter().filter(|row| matches!(row, Row::Header { .. })).count();
+                        return Some(self.group_header(ix, ordinal, label, *count, Some(column), cx));
+                    }
                     Row::Item(row) => *row,
                 };
                 let entry = pane.read(cx).state.entries.get(row.entry as usize)?.clone();
@@ -146,8 +148,10 @@ impl Browser {
                 let is_dir = entry.is_dir;
                 let icon = self.icon(icon, is_dir, theme::ROW_ICON);
                 let name_element = self.name_or_input(&path, &entry);
+                let is_cut = self.is_cut(&path);
                 let row = div()
                     .id(ix)
+                    .when(is_cut, |row| row.opacity(theme::CUT_OPACITY))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -227,6 +231,12 @@ impl Browser {
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
                 this.active_column = column;
                 this.folder_menu(cx);
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                let copy = window.modifiers().control;
+                let target = this.columns[column].pane.read(cx).state.path.clone();
+                this.drop_paths(paths.paths(), target, copy, cx);
             }))
             .child(body)
             .child(handle)

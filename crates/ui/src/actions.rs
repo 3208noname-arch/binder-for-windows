@@ -1,21 +1,25 @@
 //! 選択、キー操作、ファイル操作など、画面の表示以外の動作。
 
 use crate::browser::Browser;
-use crate::list_tree::{Flattened, Row};
+use crate::icon_cache::SMALL;
+use crate::list_tree::{Flattened, Row, group_range};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use filer_core::{Entry, ViewMode};
+use filer_core::{DragHover, Entry, ViewMode};
 use filer_shell::{
-    Operation, Prompt, clipboard_files, drag_items, init_thread, open_path, remove_ime_caret, run_recording_undo,
+    MenuChoice, Operation, Prompt, clipboard_files, drag_items, init_thread, open_path, remove_ime_caret, run_recording_undo,
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
-    ClickEvent, Context, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, ScrollStrategy, Stateful, Subscription, Window, prelude::*, rgb,
+    Bounds, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, prelude::*, px, rgb,
 };
-use std::collections::HashMap;
+use crate::folder_pane::FolderPane;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
 
 /// 名前を編集している最中の状態。
 pub struct Renaming {
@@ -28,6 +32,19 @@ pub struct Renaming {
 pub struct RowPress {
     start: Point<Pixels>,
     path: PathBuf,
+}
+
+/// ドラッグ中に止まっているフォルダ。時間が来たら開く。
+pub struct Spring {
+    path: PathBuf,
+    _task: Task<()>,
+}
+
+/// ドラッグ中に開いているフォルダの小窓。
+pub struct DragPopup {
+    path: PathBuf,
+    pane: Entity<FolderPane>,
+    position: Point<Pixels>,
 }
 
 /// 2つのパスが同じドライブ（または共有）にあるか。
@@ -176,13 +193,16 @@ impl Browser {
             }),
         )
         .when(is_dir, |row| {
-            row.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER))).on_drop(cx.listener(
-                move |this, paths: &ExternalPaths, window, cx| {
+            let spring_path = drop_path.clone();
+            row.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
+                .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    this.hover_folder(&spring_path, event.bounds, event.event.position, cx);
+                }))
+                .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                     cx.stop_propagation();
                     let copy = window.modifiers().control;
                     this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
-                },
-            ))
+                }))
         })
     }
 
@@ -199,9 +219,13 @@ impl Browser {
         }
         let Some((folder, names)) = self.selection_in_folder_of(&press.path) else { return };
         let hwnd = self.hwnd;
+        let label = match names.as_slice() {
+            [name] => name.to_string_lossy().into_owned(),
+            names => format!("{} 項目", names.len()),
+        };
         cx.notify();
         Self::outside_update(cx, move || {
-            if let Err(error) = drag_items(hwnd, &folder, &names) {
+            if let Err(error) = drag_items(hwnd, &folder, &names, &label) {
                 eprintln!("ドラッグを始められませんでした: {error}");
             }
         });
@@ -215,6 +239,23 @@ impl Browser {
     /// gpuiの更新処理の外で動かす。`cx.defer` の中だと更新が重なって落ちる。
     fn outside_update(cx: &mut Context<Self>, modal: impl FnOnce() + 'static) {
         cx.spawn(async move |_, _| modal()).detach();
+    }
+
+    /// 右クリックメニューを出す。「名前の変更」が選ばれたらアプリの入力欄を開く。
+    fn run_menu(cx: &mut Context<Self>, rename: Option<PathBuf>, modal: impl FnOnce() -> Result<MenuChoice, windows::core::Error> + 'static) {
+        cx.spawn(async move |this, cx| {
+            match modal() {
+                Ok(MenuChoice::Rename) => {
+                    let _ = this.update(cx, |browser, cx| {
+                        browser.rename_request = rename;
+                        cx.notify();
+                    });
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("メニューを出せませんでした: {error}"),
+            }
+        })
+        .detach();
     }
 
     /// `path` と同じフォルダにある選択項目。シェルのメニューとドラッグは1フォルダ単位で動く。
@@ -237,25 +278,18 @@ impl Browser {
         let Some((folder, names)) = self.selection_in_folder_of(&path) else { return };
         let hwnd = self.hwnd;
         cx.notify();
-        Self::outside_update(cx, move || {
-            if let Err(error) = show_items_menu(hwnd, &folder, &names) {
-                eprintln!("メニューを出せませんでした: {error}");
-            }
-        });
+        Self::run_menu(cx, Some(path), move || show_items_menu(hwnd, &folder, &names));
     }
 
     /// 余白の右クリック。新規作成や貼り付けのメニュー。
     pub fn folder_menu(&mut self, cx: &mut Context<Self>) {
         let (hwnd, folder) = (self.hwnd, self.current_folder(cx));
-        Self::outside_update(cx, move || {
-            if let Err(error) = show_folder_menu(hwnd, &folder) {
-                eprintln!("メニューを出せませんでした: {error}");
-            }
-        });
+        Self::run_menu(cx, None, move || show_folder_menu(hwnd, &folder));
     }
 
     /// エクスプローラーと同じく、同じドライブなら移動、別なら複写にする。Ctrlは複写。
     pub fn drop_paths(&mut self, paths: &[PathBuf], target: PathBuf, copy: bool, cx: &mut Context<Self>) {
+        self.end_spring();
         let items: Vec<PathBuf> =
             paths.iter().filter(|path| path.parent() != Some(target.as_path()) && **path != target).cloned().collect();
         let Some(first) = items.first() else { return };
@@ -295,6 +329,9 @@ impl Browser {
                 if let Operation::NewFolder { parent, name } = operation {
                     self.pending_rename = Some(parent.join(name));
                 }
+                if matches!(operation, Operation::Move { .. }) {
+                    self.cut.clear();
+                }
                 self.message = None;
             }
             Err(message) => self.message = Some(message),
@@ -318,9 +355,161 @@ impl Browser {
         if self.selection.is_empty() {
             return;
         }
-        if let Err(message) = set_clipboard_files(&self.selection.top_level(), cut) {
-            self.show_message(message, cx);
+        let items = self.selection.top_level();
+        match set_clipboard_files(&items, cut) {
+            Ok(()) => self.cut = if cut { items.into_iter().collect() } else { HashSet::new() },
+            Err(message) => self.message = Some(message),
         }
+        cx.notify();
+    }
+
+    /// 切り取った項目か。名前とアイコンを薄くして示す。
+    pub fn is_cut(&self, path: &Path) -> bool {
+        self.cut.contains(path)
+    }
+
+    /// グループの見出しのクリック。そのグループの項目をすべて選ぶ。
+    pub fn select_group(&mut self, ordinal: usize, column: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(column) = column {
+            self.active_column = column;
+        }
+        let tree = self.active_tree(cx);
+        let range = group_range(&tree, ordinal);
+        let rows = self.visible_items(cx).into_iter();
+        let members: Vec<PathBuf> = rows.filter(|(ix, _)| range.contains(ix)).map(|(_, path)| path).collect();
+        self.selection.select_all(&members);
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    fn active_tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
+        match self.view.mode {
+            ViewMode::List => self.tree(cx),
+            ViewMode::Columns => self.column_tree(self.active_column, cx),
+            ViewMode::Icons => Rc::new(Self::plain_tree(self.pane.read(cx), self.view.group).1),
+        }
+    }
+
+    /// ドラッグ中にフォルダの上で止まったら、少し待って開く。
+    pub fn hover_folder(&mut self, path: &Path, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let inside = bounds.contains(&position);
+        let current = self.spring.as_ref().is_some_and(|spring| spring.path == path);
+        if inside == current {
+            return;
+        }
+        if !inside {
+            self.spring = None;
+            return;
+        }
+        let target = path.to_path_buf();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(theme::SPRING_DELAY_MS)).await;
+            let _ = this.update(cx, |browser, cx| browser.open_hovered(target, position, cx));
+        });
+        self.spring = Some(Spring { path: path.to_path_buf(), _task: task });
+    }
+
+    fn open_hovered(&mut self, path: PathBuf, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.spring = None;
+        if !cx.has_active_drag() {
+            return;
+        }
+        match (self.view.mode, self.settings.drag_hover) {
+            (ViewMode::Columns, _) => self.open_column_for(&path, cx),
+            (_, DragHover::Popup) => {
+                let pane = self.new_pane(path.clone(), self.view.order, false, cx);
+                self.drag_popup = Some(DragPopup { path, pane, position });
+            }
+            (ViewMode::List, DragHover::Open) => {
+                if !self.expanded.contains_key(&path) {
+                    let pane = self.new_pane(path.clone(), self.view.order, false, cx);
+                    self.expanded.insert(path, pane);
+                }
+            }
+            (ViewMode::Icons, DragHover::Open) => self.navigate(path, cx),
+        }
+        cx.notify();
+    }
+
+    fn open_column_for(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(parent) = path.parent() else { return };
+        let Some(name) = path.file_name() else { return };
+        let found = self.columns.iter().position(|column| column.pane.read(cx).state.path == parent);
+        let Some(column) = found else { return };
+        let state = &self.columns[column].pane.read(cx).state;
+        let Some(entry) = state.entries.iter().find(|entry| entry.os_name() == name).cloned() else { return };
+        self.select_in_column(column, name.to_os_string(), entry, cx);
+    }
+
+    /// ドラッグの終わりに、待っているフォルダの開閉と小窓を片付ける。
+    pub fn end_spring(&mut self) {
+        self.spring = None;
+        self.drag_popup = None;
+    }
+
+    /// ドラッグ中に出すフォルダの中身の小窓。
+    pub fn drag_popup_view(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.drag_popup.is_some() && !cx.has_active_drag() {
+            self.drag_popup = None;
+        }
+        let popup = self.drag_popup.as_ref()?;
+        let (folder, position) = (popup.path.clone(), popup.position);
+        let entries: Vec<Entry> = popup.pane.read(cx).state.entries.clone();
+        let more = entries.len().saturating_sub(theme::DRAG_POPUP_ROWS);
+        let rows: Vec<_> = entries
+            .iter()
+            .take(theme::DRAG_POPUP_ROWS)
+            .enumerate()
+            .map(|(ix, entry)| {
+                let path = folder.join(entry.os_name());
+                let icon = self.icons.update(cx, |icons, _| icons.get(&folder, entry, SMALL));
+                let row = div()
+                    .id(("popup-row", ix))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .h(px(theme::ROW_HEIGHT))
+                    .px_2()
+                    .child(self.icon(icon, entry.is_dir, theme::ROW_ICON))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()));
+                self.item_mouse(row, path, entry.is_dir, cx)
+            })
+            .collect();
+        let title = folder.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let target = folder.clone();
+        let offset = px(theme::DRAG_POPUP_OFFSET);
+        Some(
+            div()
+                .id("drag-popup")
+                .absolute()
+                .left(position.x + offset)
+                .top(position.y + offset)
+                .w(px(theme::DRAG_POPUP_WIDTH))
+                .py_1()
+                .rounded_md()
+                .bg(rgb(theme::BACKGROUND))
+                .border_1()
+                .border_color(rgb(theme::LINE))
+                .shadow_md()
+                .occlude()
+                .child(div().px_2().pb_1().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+                .children(rows)
+                .when(more > 0, |panel| {
+                    panel.child(div().px_2().text_color(rgb(theme::SUB_TEXT)).child(format!("ほか {more} 項目")))
+                })
+                .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    let margin = px(theme::DRAG_POPUP_OFFSET * 2.);
+                    if !event.bounds.dilate(margin).contains(&event.event.position) {
+                        this.drag_popup = None;
+                        cx.notify();
+                    }
+                }))
+                .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                    cx.stop_propagation();
+                    let copy = window.modifiers().control;
+                    this.drop_paths(paths.paths(), target.clone(), copy, cx);
+                })),
+        )
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
@@ -463,7 +652,10 @@ impl Browser {
             "right" if mode == ViewMode::Columns => self.step_column(true, cx),
             "enter" => self.open_selection(cx),
             "backspace" => self.back(cx),
-            "escape" => self.clear_selection(cx),
+            "escape" => {
+                self.cut.clear();
+                self.clear_selection(cx);
+            }
             "delete" => self.recycle_selection(cx),
             "f2" => {
                 if let [path] = self.selection.paths().as_slice() {

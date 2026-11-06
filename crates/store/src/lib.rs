@@ -1,6 +1,6 @@
 //! 設定をSQLite 1ファイルへ保存する部品。
 
-use filer_core::FolderView;
+use filer_core::{AppSettings, FolderView};
 use std::path::Path;
 
 /// フォルダごとの表示の設定を持つ。
@@ -19,7 +19,28 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS folder_view (path TEXT PRIMARY KEY, view TEXT NOT NULL)",
             [],
         )?;
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)",
+            [],
+        )?;
         Ok(Self { connection })
+    }
+
+    /// アプリ全体の設定。保存が無ければ既定の値。
+    pub fn app_settings(&self) -> AppSettings {
+        let saved: Option<String> =
+            self.connection.query_row("SELECT value FROM app_settings WHERE id = 1", [], |row| row.get(0)).ok();
+        saved.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    }
+
+    pub fn save_app_settings(&self, settings: &AppSettings) -> rusqlite::Result<()> {
+        let text = serde_json::to_string(settings).expect("設定は必ず文字列にできる");
+        self.connection.execute(
+            "INSERT INTO app_settings (id, value) VALUES (1, ?1)
+             ON CONFLICT (id) DO UPDATE SET value = excluded.value",
+            [text],
+        )?;
+        Ok(())
     }
 
     /// 保存が無い時と、壊れていて読めない時は `None`。
@@ -50,7 +71,23 @@ fn key(folder: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filer_core::{GroupKey, ViewMode};
+    use filer_core::{DragHover, GroupKey, ViewMode};
+
+    #[test]
+    fn app_settings_come_back_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.sqlite");
+        let settings = AppSettings { drag_hover: DragHover::Popup, ..AppSettings::default() };
+        Store::open(&file).unwrap().save_app_settings(&settings).unwrap();
+        assert_eq!(Store::open(&file).unwrap().app_settings(), settings);
+    }
+
+    #[test]
+    fn missing_app_settings_use_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("s.sqlite")).unwrap();
+        assert_eq!(store.app_settings(), AppSettings::default());
+    }
 
     #[test]
     fn saved_view_comes_back_after_reopening() {

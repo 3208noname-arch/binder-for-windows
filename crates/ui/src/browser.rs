@@ -1,19 +1,21 @@
-use crate::actions::{Renaming, RowPress};
+use crate::actions::{DragPopup, Renaming, RowPress, Spring};
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::icons_view::GridData;
 use crate::list_tree::Flattened;
 use crate::size_cache::SizeCache;
 use crate::theme;
-use filer_core::{Date, Entry, Field, FolderView, GroupKey, History, Selection, SortKey, SortOrder, ViewMode};
-use filer_shell::{Operation, drives, favorites, today};
+use filer_core::{
+    AppSettings, Date, DragHover, Entry, Field, FolderView, GroupKey, History, Selection, SortKey, SortOrder, ViewMode,
+};
+use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState, MouseButton,
     MouseMoveEvent, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window, div, img, prelude::*, px, rgb,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -48,18 +50,7 @@ pub enum Menu {
     Sort,
     Group,
     Fields(Point<Pixels>),
-}
-
-/// 利用者が選べる設定。設定画面は後で足す。
-pub struct Settings {
-    /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
-    pub grid_selection_matches_hover: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { grid_selection_matches_hover: true }
-    }
+    Settings,
 }
 
 /// 行の並びが古くなっていないかを判断する材料。
@@ -97,7 +88,12 @@ pub struct Browser {
     pub active_column: usize,
     pub resizing: Option<Resize>,
     pub header_drag: Option<HeaderDrag>,
-    pub settings: Settings,
+    pub settings: AppSettings,
+    pub cut: HashSet<PathBuf>,
+    pub spring: Option<Spring>,
+    pub drag_popup: Option<DragPopup>,
+    pub rename_request: Option<PathBuf>,
+    pub drive_labels: HashMap<PathBuf, String>,
     pub menu: Option<Menu>,
     pub tree_cache: Option<(TreeKey, Rc<Flattened>)>,
     pub window_active: bool,
@@ -121,6 +117,7 @@ impl Browser {
         cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let settings = store.as_ref().map(Store::app_settings).unwrap_or_default();
         let mut view = FolderView::for_folder(saved_view(&store, &path), ViewMode::List);
         if let Some(mode) = mode {
             view.mode = mode;
@@ -163,7 +160,12 @@ impl Browser {
             active_column: 0,
             resizing: None,
             header_drag: None,
-            settings: Settings::default(),
+            settings,
+            cut: HashSet::new(),
+            spring: None,
+            drag_popup: None,
+            rename_request: None,
+            drive_labels: HashMap::new(),
             menu: None,
             tree_cache: None,
             window_active: true,
@@ -175,7 +177,39 @@ impl Browser {
             drives: drives(),
         };
         browser.reset_columns();
+        browser.load_in_background(cx);
         browser
+    }
+
+    /// ドライブ名と右クリックメニューの準備を裏で行う。切断されたドライブがあると待たされるため。
+    fn load_in_background(&self, cx: &mut Context<Self>) {
+        let drives = self.drives.clone();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            init_thread();
+            let labels: HashMap<PathBuf, String> =
+                drives.into_iter().filter_map(|drive| Some((drive.clone(), drive_label(&drive)?))).collect();
+            let _ = tx.send(labels);
+            // 初回の右クリックの遅れは、シェル拡張の読み込みに使われている
+            let _ = preload_items_menu(Path::new(r"C:\Windows"), &["explorer.exe".into()]);
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(labels) = rx.await {
+                let _ = this.update(cx, |browser, cx| {
+                    browser.drive_labels = labels;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn save_settings(&self) {
+        if let Some(store) = &self.store
+            && let Err(error) = store.save_app_settings(&self.settings)
+        {
+            eprintln!("設定を保存できませんでした: {error}");
+        }
     }
 
     pub fn new_pane(&self, path: PathBuf, order: SortOrder, wants: bool, cx: &mut Context<Self>) -> Entity<FolderPane> {
@@ -216,6 +250,7 @@ impl Browser {
         self.message = None;
         self.menu = None;
         self.renaming = None;
+        self.drag_popup = None;
         self.expanded.clear();
         self.sizes.update(cx, |sizes, _| sizes.cancel_running());
         self.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
@@ -354,6 +389,7 @@ impl Browser {
 
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
         self.end_press();
+        self.end_spring();
         if self.resizing.take().is_some() {
             self.save_active_view(cx);
         }
@@ -493,6 +529,34 @@ impl Browser {
             .collect()
     }
 
+    fn settings_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let hover = self.settings.drag_hover;
+        let choice = |id: &'static str, label: &str, value: DragHover, cx: &mut Context<Self>| {
+            Self::menu_item(id.into(), label.into(), hover == value)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.drag_hover = value;
+                    this.save_settings();
+                    this.menu = None;
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        let whole_cell = self.settings.grid_selection_matches_hover;
+        vec![
+            choice("hover-open", "ドラッグで止まると開く", DragHover::Open, cx),
+            choice("hover-popup", "ドラッグで止まると小窓", DragHover::Popup, cx),
+            div().my_1().h(px(1.)).bg(rgb(theme::LINE)).into_any_element(),
+            Self::menu_item("whole-cell".into(), "アイコンの選択を全体で示す".into(), whole_cell)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings.grid_selection_matches_hover = !this.settings.grid_selection_matches_hover;
+                    this.save_settings();
+                    this.menu = None;
+                    cx.notify();
+                }))
+                .into_any_element(),
+        ]
+    }
+
     fn open_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let top = px(theme::TOOLBAR_HEIGHT);
         Some(match self.menu? {
@@ -503,6 +567,10 @@ impl Browser {
             Menu::Group => {
                 let items = self.group_menu(cx);
                 Self::popup(|d| d.top(top).right(px(theme::GROUP_MENU_RIGHT)), items).into_any_element()
+            }
+            Menu::Settings => {
+                let items = self.settings_menu(cx);
+                Self::popup(|d| d.top(top).right(px(theme::MENU_RIGHT_SETTINGS)), items).into_any_element()
             }
             Menu::Fields(position) => {
                 let items = self.fields_menu(cx);
@@ -549,6 +617,7 @@ impl Browser {
                     .child(self.segment("mode-list", "リスト", ViewMode::List, cx))
                     .child(self.segment("mode-icons", "アイコン", ViewMode::Icons, cx)),
             )
+            .child(self.menu_button("settings", "設定 ▾".to_string(), Menu::Settings, cx))
     }
 
     fn sidebar_item(&self, id: String, label: String, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -588,8 +657,9 @@ impl Browser {
             .drives
             .iter()
             .map(|drive| {
-                let label = drive.display().to_string().trim_end_matches('\\').to_string();
-                self.sidebar_item(format!("drive-{label}"), label, drive.clone(), cx)
+                let short = drive.display().to_string().trim_end_matches('\\').to_string();
+                let label = self.drive_labels.get(drive).cloned().unwrap_or_else(|| short.clone());
+                self.sidebar_item(format!("drive-{short}"), label, drive.clone(), cx)
             })
             .collect();
         div()
@@ -656,6 +726,9 @@ impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_active = window.is_window_active();
         self.sync_with_listing(window, cx);
+        if let Some(path) = self.rename_request.take() {
+            self.begin_rename(path, window, cx);
+        }
         let error = self.pane.read(cx).state.error.clone();
         let body = match (error, self.view.mode) {
             (Some(message), _) => div()
@@ -674,6 +747,7 @@ impl Render for Browser {
         let sidebar = self.sidebar(cx);
         let status = self.status(cx);
         let menu = self.open_menu(cx);
+        let drag_popup = self.drag_popup_view(cx);
         div()
             .relative()
             .flex()
@@ -704,5 +778,6 @@ impl Render for Browser {
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
             .child(status)
             .children(menu)
+            .children(drag_popup)
     }
 }

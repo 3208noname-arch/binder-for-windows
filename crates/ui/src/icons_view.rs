@@ -1,7 +1,6 @@
 use crate::browser::Browser;
 use crate::icon_cache::LARGE;
 use crate::list_tree::{Flattened, Row};
-use crate::list_view::group_header;
 use crate::theme;
 use filer_core::{Date, Entry, GroupKey};
 use gpui::{AnyElement, Context, MouseButton, Window, div, list, prelude::*, px, rgb};
@@ -19,7 +18,7 @@ pub struct GridData {
 
 /// アイコン表示の1行。見出しか、並べるセルの番号。
 pub enum GridRow {
-    Header { label: String, count: usize },
+    Header { ordinal: usize, label: String, count: usize },
     Cells(Vec<u32>),
 }
 
@@ -27,13 +26,15 @@ pub enum GridRow {
 pub fn grid_rows_of(tree: &Flattened, per_row: usize) -> Vec<GridRow> {
     let mut rows = Vec::new();
     let mut cells = Vec::new();
+    let mut ordinal = 0;
     for row in &tree.rows {
         match row {
             Row::Header { label, count } => {
                 if !cells.is_empty() {
                     rows.push(GridRow::Cells(std::mem::take(&mut cells)));
                 }
-                rows.push(GridRow::Header { label: label.clone(), count: *count });
+                rows.push(GridRow::Header { ordinal, label: label.clone(), count: *count });
+                ordinal += 1;
             }
             Row::Item(item) => {
                 cells.push(item.entry);
@@ -104,6 +105,7 @@ impl Browser {
             .child(self.name_or_input(&path, entry));
         let cell = div()
             .id(("cell", ix))
+            .when(self.is_cut(&path), |cell| cell.opacity(theme::CUT_OPACITY))
             .flex()
             .flex_col()
             .flex_none()
@@ -127,7 +129,7 @@ impl Browser {
         };
         let folder = self.pane.read(cx).state.path.clone();
         match data.get(index) {
-            Some(GridRow::Header { label, count }) => group_header(index, label, *count),
+            Some(GridRow::Header { ordinal, label, count }) => self.group_header(index, *ordinal, label, *count, None, cx),
             Some(GridRow::Cells(cells)) => {
                 let entries: Vec<(usize, Entry)> = {
                     let state = &self.pane.read(cx).state;

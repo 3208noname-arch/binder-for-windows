@@ -57,6 +57,12 @@ fn local_date_of_mid_year_is_in_2026() {
 }
 
 #[test]
+fn drive_label_names_the_drive() {
+    let label = filer_shell::drive_label(Path::new(r"C:\")).expect("label");
+    assert!(label.contains("C:"), "{label}");
+}
+
+#[test]
 fn drives_include_system_drive() {
     assert!(drives().iter().any(|d| d == Path::new(r"C:\")));
 }

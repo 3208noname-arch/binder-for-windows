@@ -1685,6 +1685,7 @@ dependencies = [
  "gpui",
  "raw-window-handle",
  "unicode-segmentation",
+ "windows 0.61.3",
 ]
 
 [[package]]

@@ -12,6 +12,30 @@ pub enum ViewMode {
     Icons,
 }
 
+/// ドラッグ中にフォルダの上で止まった時の動き。カラム表示は常に列を開く。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DragHover {
+    /// フォルダを開く
+    Open,
+    /// 中身を小さな窓で見せる
+    Popup,
+}
+
+/// アプリ全体の設定。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
+    pub grid_selection_matches_hover: bool,
+    pub drag_hover: DragHover,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { grid_selection_matches_hover: true, drag_hover: DragHover::Open }
+    }
+}
+
 /// リストに出せる項目。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Field {

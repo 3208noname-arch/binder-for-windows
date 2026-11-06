@@ -1,5 +1,6 @@
 use filer_core::{Entry, Group};
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 /// リストの1行が、どのフォルダの何番目の項目かを表す。
@@ -41,6 +42,14 @@ fn walk(folder: &Path, depth: u32, lists: &HashMap<PathBuf, &[Entry]>, flat: &mu
     }
 }
 
+/// `ordinal` 番目のグループの見出しより後、次の見出しより前の行の範囲。
+pub fn group_range(tree: &Flattened, ordinal: usize) -> Range<usize> {
+    let is_header = |row: &Row| matches!(row, Row::Header { .. });
+    let mut headers = tree.rows.iter().enumerate().filter(|(_, row)| is_header(row)).map(|(ix, _)| ix);
+    let Some(header) = headers.nth(ordinal) else { return 0..0 };
+    (header + 1)..headers.next().unwrap_or(tree.rows.len())
+}
+
 /// 先頭の階層の項目をグループに分け、見出しの行を挟んで展開する。
 pub fn flatten_grouped(
     root: &Path,
@@ -68,6 +77,16 @@ pub fn flatten_grouped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_range_stops_at_next_header() {
+        let header = || Row::Header { label: "g".into(), count: 1 };
+        let item = || Row::Item(TreeRow { depth: 0, folder: 0, entry: 0 });
+        let tree = Flattened { folders: vec![], rows: vec![header(), item(), item(), header(), item()] };
+        assert_eq!(group_range(&tree, 0), 1..3);
+        assert_eq!(group_range(&tree, 1), 4..5);
+        assert_eq!(group_range(&tree, 9), 0..0);
+    }
 
     #[test]
     fn groups_get_headers_with_counts_in_rank_order() {

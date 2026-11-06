@@ -1,19 +1,20 @@
 use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     DeleteObject, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ,
 };
-use windows::Win32::Storage::FileSystem::GetLogicalDriveStringsW;
+use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, GetLogicalDriveStringsW};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile,
-    IShellItemImageFactory, KF_FLAG_DEFAULT, SHCreateItemFromParsingName, SHGetKnownFolderPath,
+    IShellItemImageFactory, KF_FLAG_DEFAULT, SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_DISPLAYNAME,
+    SHGetFileInfoW, SHGetKnownFolderPath,
     SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT,
 };
-use windows::core::{GUID, HSTRING};
+use windows::core::{GUID, HSTRING, PCWSTR};
 
 /// 裏のスレッドでシェルの部品を使う前に、1回呼ぶ。
 pub fn init_thread() {
@@ -95,6 +96,22 @@ pub fn drives() -> Vec<PathBuf> {
         .filter(|drive| !drive.is_empty())
         .map(|drive| OsString::from_wide(drive).into())
         .collect()
+}
+
+/// エクスプローラーと同じドライブの表示名。切断されたドライブでは待たされるので、裏で呼ぶ。
+pub fn drive_label(drive: &Path) -> Option<String> {
+    let path: Vec<u16> = drive.as_os_str().encode_wide().chain([0]).collect();
+    let mut info = SHFILEINFOW::default();
+    let size = size_of::<SHFILEINFOW>() as u32;
+    let found = unsafe {
+        SHGetFileInfoW(PCWSTR(path.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info), size, SHGFI_DISPLAYNAME)
+    };
+    if found == 0 {
+        return None;
+    }
+    let name = &info.szDisplayName;
+    let length = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..length]))
 }
 
 fn known_folder(id: &GUID) -> Option<PathBuf> {
