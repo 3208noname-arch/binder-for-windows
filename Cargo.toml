@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+filer-core = { path = "crates/core" }
+filer-shell = { path = "crates/shell" }
+gpui = "=0.2.2"
+windows = "0.61"
+
+[profile.release]
+debug = 1
