@@ -160,7 +160,7 @@ struct LabelLook {
 impl Browser {
     /// 名前の編集欄。折り返しは表示と同じ幅にして、隣のセルの下の行まで重ねて出す。
     fn grid_rename(&self, lines: f32, input: Entity<TextInput>) -> AnyElement {
-        let width = theme::grid_label_width(self.view.icon_size) + theme::RENAME_SIDE * 2.;
+        let width = theme::grid_label_width(self.tab.view.icon_size) + theme::RENAME_SIDE * 2.;
         div()
             .relative()
             .w_full()
@@ -171,9 +171,9 @@ impl Browser {
 
     /// アイコンの下の名前。3行に収まらない分は薄く消し、設定によってマウスを乗せると流す。
     fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window) -> AnyElement {
-        let width = theme::grid_label_width(self.view.icon_size);
+        let width = theme::grid_label_width(self.tab.view.icon_size);
         let lines = label_lines(&entry.name, width, window);
-        if let Some(renaming) = self.renaming.as_ref().filter(|renaming| renaming.path == path) {
+        if let Some(renaming) = self.tab.renaming.as_ref().filter(|renaming| renaming.path == path) {
             return self.grid_rename(lines, renaming.input.clone());
         }
         let line = theme::GRID_LABEL_LINE;
@@ -216,11 +216,11 @@ impl Browser {
 
     fn grid_cell(&self, ix: usize, folder: &Path, entry: &Entry, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
-        let selected = self.selection.contains(&path);
+        let selected = self.tab.selection.contains(&path);
         let whole_cell = self.settings.grid_selection_matches_hover;
         let (selected_background, selected_text) = self.selection_colors();
         let is_dir = entry.is_dir;
-        let size = self.view.icon_size;
+        let size = self.tab.view.icon_size;
         let (cell_width, _) = grid_metrics(size);
         let bucket = if size > LARGE as f32 { HUGE } else { LARGE };
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, bucket));
@@ -269,19 +269,19 @@ impl Browser {
     }
 
     fn grid_row(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(data) = self.grid_data.as_ref().map(|data| data.rows.clone()) else {
+        let Some(data) = self.tab.grid_data.as_ref().map(|data| data.rows.clone()) else {
             return div().into_any_element();
         };
-        let folder = self.pane.read(cx).state.path.clone();
+        let folder = self.tab.pane.read(cx).state.path.clone();
         match data.get(index) {
             Some(GridRow::Header { ordinal, label, count }) => self.group_header(index, *ordinal, label, *count, None, cx),
             Some(GridRow::Cells(cells)) => {
                 let entries: Vec<(usize, Entry)> = {
-                    let state = &self.pane.read(cx).state;
+                    let state = &self.tab.pane.read(cx).state;
                     cells.iter().filter_map(|&i| Some((i as usize, state.entries.get(i as usize)?.clone()))).collect()
                 };
                 let cells: Vec<_> = entries.iter().map(|(ix, entry)| self.grid_cell(*ix, &folder, entry, window, cx)).collect();
-                let (_, row_height) = grid_metrics(self.view.icon_size);
+                let (_, row_height) = grid_metrics(self.tab.view.icon_size);
                 div()
                     .id(index)
                     .flex()
@@ -299,11 +299,11 @@ impl Browser {
 
     /// 中身か横の個数が変わった時だけ、行を作り直す。スクロールの位置は保つ。
     fn refresh_grid(&mut self, per_row: usize, cx: &Context<Self>) {
-        let pane = self.pane.read(cx);
-        let group = self.view.group;
+        let pane = self.tab.pane.read(cx);
+        let group = self.tab.view.group;
         let today = filer_shell::today();
-        let icon_size = self.view.icon_size;
-        let fresh = self.grid_data.as_ref().is_some_and(|data| {
+        let icon_size = self.tab.view.icon_size;
+        let fresh = self.tab.grid_data.as_ref().is_some_and(|data| {
             data.version == pane.version
                 && data.group == group
                 && data.per_row == per_row
@@ -316,18 +316,18 @@ impl Browser {
         let (_, tree) = Self::plain_tree(pane, group);
         let rows = Rc::new(grid_rows_of(&tree, per_row));
         let version = pane.version;
-        let old = self.grid_list.item_count();
-        let top = self.grid_list.logical_scroll_top();
-        self.grid_list.splice(0..old, rows.len());
-        self.grid_list.scroll_to(top);
-        self.grid_data = Some(GridData { version, group, per_row, icon_size, today, rows });
+        let old = self.tab.grid_list.item_count();
+        let top = self.tab.grid_list.logical_scroll_top();
+        self.tab.grid_list.splice(0..old, rows.len());
+        self.tab.grid_list.scroll_to(top);
+        self.tab.grid_data = Some(GridData { version, group, per_row, icon_size, today, rows });
     }
 
     pub fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let width: f32 = (window.viewport_size().width - px(theme::SIDEBAR_WIDTH + theme::GRID_SIDE_PADDING * 2.)).into();
-        let (cell_width, _) = grid_metrics(self.view.icon_size);
+        let (cell_width, _) = grid_metrics(self.tab.view.icon_size);
         let per_row = ((width / (cell_width + theme::GRID_CELL_GAP)) as usize).max(1);
-        self.grid_per_row = per_row;
+        self.tab.grid_per_row = per_row;
         self.refresh_grid(per_row, cx);
         let bar = self.scrollbar("grid-bar", ScrollTarget::Grid, true, 0., cx);
         div()
@@ -338,7 +338,7 @@ impl Browser {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if event.modifiers.control {
                     let notches = f32::from(event.delta.pixel_delta(px(theme::ROW_HEIGHT)).y).signum();
-                    let size = (this.view.icon_size + notches * theme::ICON_SIZE_STEP).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
+                    let size = (this.tab.view.icon_size + notches * theme::ICON_SIZE_STEP).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
                     this.update_view(cx, |view| view.icon_size = size);
                 }
             }))
@@ -352,7 +352,7 @@ impl Browser {
             .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.folder_menu(cx)))
             .child(
                 list(
-                    self.grid_list.clone(),
+                    self.tab.grid_list.clone(),
                     cx.processor(|this, index: usize, window: &mut Window, cx| this.grid_row(index, window, cx)),
                 )
                 .size_full(),

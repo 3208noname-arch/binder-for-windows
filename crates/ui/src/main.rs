@@ -14,6 +14,7 @@ mod scrollbar;
 mod search;
 mod settings_view;
 mod size_cache;
+mod tabs;
 mod text_input;
 mod theme;
 
@@ -24,13 +25,13 @@ use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px
 use std::path::PathBuf;
 use std::time::Instant;
 
-fn start_path() -> PathBuf {
-    let path: PathBuf = std::env::args_os()
-        .skip(1)
-        .find(|arg| !arg.to_string_lossy().starts_with("--"))
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .unwrap_or_else(|| "C:\\".into())
-        .into();
+/// 起動の引数で指定されたフォルダ。
+fn given_path() -> Option<std::ffi::OsString> {
+    std::env::args_os().skip(1).find(|arg| !arg.to_string_lossy().starts_with("--"))
+}
+
+fn start_path(given: Option<std::ffi::OsString>) -> PathBuf {
+    let path: PathBuf = given.or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_else(|| "C:\\".into()).into();
     std::path::absolute(&path).unwrap_or(path)
 }
 
@@ -87,7 +88,9 @@ fn main() {
     log_panics();
     let start = Instant::now();
     let measure = std::env::args_os().any(|arg| arg == "--measure").then_some(start);
-    let path = start_path();
+    let given = given_path();
+    let restore = given.is_none();
+    let path = start_path(given);
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let options = WindowOptions {
@@ -96,7 +99,7 @@ fn main() {
         };
         text_input::bind_keys(cx);
         let (mode, store) = (start_mode(), open_store());
-        cx.open_window(options, move |window, cx| cx.new(|cx| Browser::new(path, mode, store, measure, window, cx))).unwrap();
+        cx.open_window(options, move |window, cx| cx.new(|cx| Browser::new(path, restore, mode, store, measure, window, cx))).unwrap();
         // 設定のウィンドウだけが残っても、本体を閉じたら終える
         cx.on_window_closed(|cx| {
             if !cx.windows().iter().any(|window| window.downcast::<Browser>().is_some()) {

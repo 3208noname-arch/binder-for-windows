@@ -28,6 +28,11 @@ pub struct SearchRun {
 }
 
 impl SearchRun {
+    /// 検索を始める前の表示形式。
+    pub fn mode(&self) -> ViewMode {
+        self.view.mode
+    }
+
     /// 検索の間も、隠し項目の切り替えなどを届ける先。
     pub fn panes(&self) -> impl Iterator<Item = &Entity<FolderPane>> {
         std::iter::once(&self.pane).chain(self.columns.iter().map(|column| &column.pane)).chain(self.expanded.values())
@@ -36,7 +41,7 @@ impl SearchRun {
 
 impl Browser {
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(search) = &self.search_box {
+        if let Some(search) = &self.tab.search_box {
             window.focus(&search.input.focus_handle(cx));
             return;
         }
@@ -47,13 +52,13 @@ impl Browser {
             InputEvent::Cancel => this.drop_search(cx),
         });
         window.focus(&input.focus_handle(cx));
-        self.search_box = Some(SearchBox { input, recursive: true, _subscription: subscription });
+        self.tab.search_box = Some(SearchBox { input, recursive: true, _subscription: subscription });
         cx.notify();
     }
 
     /// 検索欄を閉じて、元の表示へ戻す。
     pub fn drop_search(&mut self, cx: &mut Context<Self>) {
-        if self.search_box.take().is_some() {
+        if self.tab.search_box.take().is_some() {
             filer_shell::remove_ime_caret();
             self.refocus = true;
         }
@@ -63,33 +68,33 @@ impl Browser {
 
     /// 検索の結果を片付けて、退避していた表示を戻す。検索欄は開いたまま。
     fn stop_search(&mut self, cx: &mut Context<Self>) {
-        let Some(run) = self.search_run.take() else { return };
-        self.pane = run.pane;
-        self.view = run.view;
-        self.columns = run.columns;
-        self.active_column = run.active_column;
-        self.column_anchor = run.column_anchor;
-        self.expanded = run.expanded;
+        let Some(run) = self.tab.search_run.take() else { return };
+        self.tab.pane = run.pane;
+        self.tab.view = run.view;
+        self.tab.columns = run.columns;
+        self.tab.active_column = run.active_column;
+        self.tab.column_anchor = run.column_anchor;
+        self.tab.expanded = run.expanded;
         self.forget_rows();
         cx.notify();
     }
 
     fn forget_rows(&mut self) {
-        self.selection.clear();
-        self.tree_cache = None;
-        self.grid_data = None;
-        self.grid_list.reset(0);
+        self.tab.selection.clear();
+        self.tab.tree_cache = None;
+        self.tab.grid_data = None;
+        self.tab.grid_list.reset(0);
     }
 
     /// 検索欄の文字で探す。空なら元の表示に戻す。
     fn run_search(&mut self, cx: &mut Context<Self>) {
-        let Some(search) = &self.search_box else { return };
+        let Some(search) = &self.tab.search_box else { return };
         let query = SearchQuery::new(&search.input.read(cx).text(), search.recursive);
         if query.terms.is_empty() {
             self.stop_search(cx);
-        } else if self.search_run.is_some() {
-            self.selection.clear();
-            self.pane.update(cx, |pane, cx| pane.set_query(query, cx));
+        } else if self.tab.search_run.is_some() {
+            self.tab.selection.clear();
+            self.tab.pane.update(cx, |pane, cx| pane.set_query(query, cx));
         } else {
             self.start_search(query, cx);
         }
@@ -98,10 +103,10 @@ impl Browser {
 
     fn start_search(&mut self, query: SearchQuery, cx: &mut Context<Self>) {
         let root = self.current_folder(cx);
-        let (order, show_hidden) = (self.view.order, self.settings.show_hidden);
+        let (order, show_hidden) = (self.tab.view.order, self.settings.show_hidden);
         let pane = cx.new(|cx| FolderPane::new_search(root, order, show_hidden, query, cx));
         cx.observe(&pane, |_, _, cx| cx.notify()).detach();
-        let mut view = self.view.clone();
+        let mut view = self.tab.view.clone();
         view.mode = ViewMode::List;
         view.group = GroupKey::None;
         if let Some(name) = view.columns.iter().position(|column| column.field == Field::Name) {
@@ -109,19 +114,19 @@ impl Browser {
             view.columns.insert(name + 1, ListColumn { field, width: field.default_width() });
         }
         let run = SearchRun {
-            pane: std::mem::replace(&mut self.pane, pane.clone()),
-            view: std::mem::replace(&mut self.view, view.clone()),
-            columns: std::mem::replace(&mut self.columns, vec![Column::new(pane, view)]),
-            active_column: std::mem::take(&mut self.active_column),
-            column_anchor: self.column_anchor.take(),
-            expanded: std::mem::take(&mut self.expanded),
+            pane: std::mem::replace(&mut self.tab.pane, pane.clone()),
+            view: std::mem::replace(&mut self.tab.view, view.clone()),
+            columns: std::mem::replace(&mut self.tab.columns, vec![Column::new(pane, view)]),
+            active_column: std::mem::take(&mut self.tab.active_column),
+            column_anchor: self.tab.column_anchor.take(),
+            expanded: std::mem::take(&mut self.tab.expanded),
         };
-        self.search_run = Some(run);
+        self.tab.search_run = Some(run);
         self.forget_rows();
     }
 
     fn search_scope(&self, id: &'static str, label: &'static str, recursive: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let active = self.search_box.as_ref().is_some_and(|search| search.recursive == recursive);
+        let active = self.tab.search_box.as_ref().is_some_and(|search| search.recursive == recursive);
         div()
             .id(id)
             .px_2()
@@ -131,7 +136,7 @@ impl Browser {
             .hover(|style| style.bg(rgb(theme::HOVER)))
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(search) = &mut this.search_box {
+                if let Some(search) = &mut this.tab.search_box {
                     search.recursive = recursive;
                 }
                 this.run_search(cx);
@@ -140,7 +145,7 @@ impl Browser {
 
     /// 検索欄の下の、探す範囲を選ぶ帯。
     pub fn search_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        self.search_box.as_ref()?;
+        self.tab.search_box.as_ref()?;
         let folder = self.current_folder(cx);
         let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
         Some(

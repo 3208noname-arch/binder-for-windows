@@ -133,18 +133,18 @@ impl Browser {
             return 1.;
         }
         let bar = match target {
-            ScrollTarget::Column(index) => self.columns.get(index).map(|column| &column.bar),
-            _ => self.bars.get(&target),
+            ScrollTarget::Column(index) => self.tab.columns.get(index).map(|column| &column.bar),
+            _ => self.tab.bars.get(&target),
         };
         bar.map_or(0., |bar| bar.opacity(Instant::now()))
     }
 
     fn scroll_handle(&self, target: ScrollTarget) -> Option<ScrollHandle> {
         match target {
-            ScrollTarget::List => Some(self.list_scroll.0.borrow().base_handle.clone()),
-            ScrollTarget::ListColumns => Some(self.list_columns_scroll.clone()),
-            ScrollTarget::Column(column) => Some(self.columns.get(column)?.scroll.0.borrow().base_handle.clone()),
-            ScrollTarget::Columns => Some(self.columns_scroll.clone()),
+            ScrollTarget::List => Some(self.tab.list_scroll.0.borrow().base_handle.clone()),
+            ScrollTarget::ListColumns => Some(self.tab.list_columns_scroll.clone()),
+            ScrollTarget::Column(column) => Some(self.tab.columns.get(column)?.scroll.0.borrow().base_handle.clone()),
+            ScrollTarget::Columns => Some(self.tab.columns_scroll.clone()),
             ScrollTarget::Sidebar => Some(self.sidebar_scroll.clone()),
             ScrollTarget::Grid => None,
         }
@@ -152,9 +152,9 @@ impl Browser {
 
     fn scroll_metrics(&self, target: ScrollTarget, vertical: bool) -> Option<ScrollMetrics> {
         if target == ScrollTarget::Grid {
-            let offset: f32 = self.grid_list.scroll_px_offset_for_scrollbar().y.into();
-            let max: f32 = self.grid_list.max_offset_for_scrollbar().height.into();
-            let viewport: f32 = self.grid_list.viewport_bounds().size.height.into();
+            let offset: f32 = self.tab.grid_list.scroll_px_offset_for_scrollbar().y.into();
+            let max: f32 = self.tab.grid_list.max_offset_for_scrollbar().height.into();
+            let viewport: f32 = self.tab.grid_list.viewport_bounds().size.height.into();
             return Some(ScrollMetrics { offset: -offset, max, viewport });
         }
         let handle = self.scroll_handle(target)?;
@@ -207,7 +207,7 @@ impl Browser {
         let offset = drag.start_offset + (along(event.position, drag.vertical) - drag.start) * drag.scale;
         let offset = -offset.max(0.0);
         if drag.target == ScrollTarget::Grid {
-            self.grid_list.set_offset_from_scrollbar(point(px(0.), px(offset)));
+            self.tab.grid_list.set_offset_from_scrollbar(point(px(0.), px(offset)));
         } else if let Some(handle) = self.scroll_handle(drag.target) {
             let current = handle.offset();
             handle.set_offset(if drag.vertical { point(current.x, px(offset)) } else { point(px(offset), current.y) });
@@ -217,7 +217,7 @@ impl Browser {
 
     /// 下の帯のアイコンの大きさの部品。
     pub fn icon_size_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let size = self.view.icon_size;
+        let size = self.tab.view.icon_size;
         let ratio = (size - MIN_ICON_SIZE) / (MAX_ICON_SIZE - MIN_ICON_SIZE);
         let step = |id: &'static str, label: &'static str, delta: f32, cx: &mut Context<Self>| {
             div()
@@ -226,7 +226,7 @@ impl Browser {
                 .cursor(CursorStyle::PointingHand)
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let size = (this.view.icon_size + delta).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
+                    let size = (this.tab.view.icon_size + delta).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
                     this.update_view(cx, |view| view.icon_size = size);
                 }))
         };
@@ -268,7 +268,7 @@ impl Browser {
         let Some(drag) = self.icon_size_drag else { return };
         let moved = f32::from(event.position.x) - drag.start_x;
         let per_pixel = (MAX_ICON_SIZE - MIN_ICON_SIZE) / (theme::ICON_SLIDER_WIDTH - 12.);
-        self.view.icon_size = (drag.start_size + moved * per_pixel).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
+        self.tab.view.icon_size = (drag.start_size + moved * per_pixel).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
         cx.notify();
     }
 }

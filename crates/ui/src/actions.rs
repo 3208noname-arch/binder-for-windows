@@ -44,6 +44,8 @@ pub enum SpringTarget {
     Go(PathBuf),
     Back,
     Parent,
+    /// タブの帯の1枚
+    Tab(u64),
 }
 
 /// ドラッグ中に止まっている先。時間が来たら開く。
@@ -92,32 +94,29 @@ fn items_of(tree: &Flattened, lists: &HashMap<&Path, &[Entry]>) -> Vec<(usize, P
 impl Browser {
     /// 今操作しているフォルダ。カラムでは操作中の列。
     pub fn current_folder(&self, cx: &Context<Self>) -> PathBuf {
-        match self.view.mode {
-            ViewMode::Columns => self.columns[self.active_column].pane.read(cx).state.path.clone(),
-            _ => self.history.current().to_path_buf(),
-        }
+        self.tab.folder(cx)
     }
 
     /// 画面に並んでいる順の項目。
     fn visible_items(&mut self, cx: &Context<Self>) -> Vec<(usize, PathBuf)> {
-        match self.view.mode {
+        match self.tab.view.mode {
             ViewMode::List => {
                 let tree = self.tree(cx);
-                let root = self.pane.read(cx);
+                let root = self.tab.pane.read(cx);
                 let mut lists = HashMap::from([(root.state.path.as_path(), root.state.entries.as_slice())]);
-                for (path, pane) in &self.expanded {
+                for (path, pane) in &self.tab.expanded {
                     lists.insert(path.as_path(), pane.read(cx).state.entries.as_slice());
                 }
                 items_of(&tree, &lists)
             }
             ViewMode::Columns => {
-                let tree = self.column_tree(self.active_column, cx);
-                let state = &self.columns[self.active_column].pane.read(cx).state;
+                let tree = self.column_tree(self.tab.active_column, cx);
+                let state = &self.tab.columns[self.tab.active_column].pane.read(cx).state;
                 items_of(&tree, &HashMap::from([(state.path.as_path(), state.entries.as_slice())]))
             }
             ViewMode::Icons => {
-                let pane = self.pane.read(cx);
-                let (_, tree) = Self::plain_tree(pane, self.view.group);
+                let pane = self.tab.pane.read(cx);
+                let (_, tree) = Self::plain_tree(pane, self.tab.view.group);
                 let state = &pane.state;
                 items_of(&tree, &HashMap::from([(state.path.as_path(), state.entries.as_slice())]))
             }
@@ -126,8 +125,8 @@ impl Browser {
 
     /// 今読み込まれている項目のすべて。隠れている親の列も含む。
     fn known_paths(&self, cx: &Context<Self>) -> Vec<PathBuf> {
-        let columns = self.columns.iter().map(|column| &column.pane);
-        let panes = std::iter::once(&self.pane).chain(self.expanded.values()).chain(columns);
+        let columns = self.tab.columns.iter().map(|column| &column.pane);
+        let panes = std::iter::once(&self.tab.pane).chain(self.tab.expanded.values()).chain(columns);
         let lists = panes.map(|pane| &pane.read(cx).state);
         lists.flat_map(|state| state.entries.iter().map(|entry| state.path.join(entry.os_name()))).collect()
     }
@@ -135,19 +134,19 @@ impl Browser {
     /// 消えた項目や、閉じたフォルダの中の項目を選択から外す。
     /// 新規フォルダの一覧への反映を待って、名前の編集を始める。
     pub fn sync_with_listing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.pane.read(cx);
-        let version = self.expanded.values().map(|pane| pane.read(cx).version).sum::<u64>()
-            + self.columns.iter().map(|column| column.pane.read(cx).version).sum::<u64>()
+        let root = self.tab.pane.read(cx);
+        let version = self.tab.expanded.values().map(|pane| pane.read(cx).version).sum::<u64>()
+            + self.tab.columns.iter().map(|column| column.pane.read(cx).version).sum::<u64>()
             + root.version
-            + self.expanded.len() as u64;
-        if version == self.synced_version || root.state.loading {
+            + self.tab.expanded.len() as u64;
+        if version == self.tab.synced_version || root.state.loading {
             return;
         }
-        self.synced_version = version;
+        self.tab.synced_version = version;
         let known = self.known_paths(cx);
-        self.selection.retain_existing(&known);
-        if let Some(path) = self.pending_rename.take_if(|path| known.contains(path)) {
-            self.selection.select_only(path.clone());
+        self.tab.selection.retain_existing(&known);
+        if let Some(path) = self.tab.pending_rename.take_if(|path| known.contains(path)) {
+            self.tab.selection.select_only(path.clone());
             self.begin_rename(path, window, cx);
         }
     }
@@ -161,7 +160,7 @@ impl Browser {
         if std::mem::take(&mut self.suppress_click) {
             return;
         }
-        if self.renaming.as_ref().is_some_and(|renaming| renaming.path == path) {
+        if self.tab.renaming.as_ref().is_some_and(|renaming| renaming.path == path) {
             return;
         }
         let modifiers = event.modifiers();
@@ -169,13 +168,17 @@ impl Browser {
             self.open_item(path, is_dir, cx);
             return;
         }
+        if event.click_count() == 2 && modifiers.control && !modifiers.shift && is_dir {
+            self.open_in_new_tab(path, cx);
+            return;
+        }
         if modifiers.control {
-            self.selection.toggle(path);
+            self.tab.selection.toggle(path);
         } else if modifiers.shift {
             let ordered = self.ordered_paths(cx);
-            self.selection.extend_to(&path, &ordered);
+            self.tab.selection.extend_to(&path, &ordered);
         } else {
-            self.selection.select_only(path);
+            self.tab.selection.select_only(path);
         }
         window.focus(&self.focus);
         cx.notify();
@@ -183,7 +186,7 @@ impl Browser {
 
     fn open_item(&mut self, path: PathBuf, is_dir: bool, cx: &mut Context<Self>) {
         if is_dir {
-            if self.view.mode != ViewMode::Columns || !self.pin_folder(&path, cx) {
+            if self.tab.view.mode != ViewMode::Columns || !self.pin_folder(&path, cx) {
                 self.navigate(path, cx);
             }
             return;
@@ -193,24 +196,37 @@ impl Browser {
             init_thread();
             let _ = tx.send(open_target(&path));
         });
+        let tab = self.tab.id;
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("開く処理が途中で止まりました".to_string()));
             let _ = this.update(cx, |browser, cx| match result {
                 Ok(Opened::Launched) => {}
-                Ok(Opened::Folder(folder)) => browser.navigate(folder, cx),
-                Err(message) => browser.show_message(message, cx),
+                Ok(Opened::Folder(folder)) => {
+                    browser.on_tab(tab, cx, |browser, cx| browser.navigate(folder, cx));
+                }
+                Err(message) => browser.show_message_on(tab, message, cx),
             });
         })
         .detach();
     }
 
     pub fn show_message(&mut self, message: String, cx: &mut Context<Self>) {
-        self.message = Some(message);
+        self.tab.message = Some(message);
+        cx.notify();
+    }
+
+    /// 頼んだタブへ伝える。閉じられていたら今のタブへ出す。
+    fn show_message_on(&mut self, tab: u64, message: String, cx: &mut Context<Self>) {
+        let mut text = Some(message);
+        self.on_tab(tab, cx, |browser, _| browser.tab.message = text.take());
+        if let Some(message) = text {
+            self.tab.message = Some(message);
+        }
         cx.notify();
     }
 
     fn open_selection(&mut self, cx: &mut Context<Self>) {
-        for path in self.selection.paths() {
+        for path in self.tab.selection.paths() {
             self.open_item(path.clone(), path.is_dir(), cx);
         }
     }
@@ -225,7 +241,7 @@ impl Browser {
 
     /// ドラッグが乗った時の背景。文字が白い選択行に灰色を敷くと読めないので、濃い青にする。
     fn drop_color(&self, path: &Path, cx: &Context<Self>) -> u32 {
-        let selected = self.selection.contains(path) || self.is_open_in_column(path, cx);
+        let selected = self.tab.selection.contains(path) || self.is_open_in_column(path, cx);
         if selected && self.selection_colors().1 == theme::SELECTED_TEXT { theme::SELECTED_DROP } else { theme::HOVER }
     }
 
@@ -240,7 +256,7 @@ impl Browser {
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 let grabbed = std::mem::take(&mut this.grab_press);
-                if this.renaming.as_ref().is_some_and(|renaming| renaming.path == press_path) {
+                if this.tab.renaming.as_ref().is_some_and(|renaming| renaming.path == press_path) {
                     return;
                 }
                 this.commit_rename(window, cx);
@@ -258,8 +274,15 @@ impl Browser {
             }),
         )
         .when(is_dir, |row| {
-            let (spring_path, over_path) = (drop_path.clone(), drop_path.clone());
-            row.drag_over::<ExternalPaths>(move |style, paths: &ExternalPaths, _, _| {
+            let (spring_path, over_path, tab_path) = (drop_path.clone(), drop_path.clone(), drop_path.clone());
+            row.on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_in_new_tab(tab_path.clone(), cx);
+                }),
+            )
+            .drag_over::<ExternalPaths>(move |style, paths: &ExternalPaths, _, _| {
                 if carries(paths.paths(), &over_path) { style } else { style.bg(rgb(drop_color)) }
             })
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
@@ -268,9 +291,9 @@ impl Browser {
                     this.hover_target(target, event.bounds, event.event.position, cx);
                 }
             }))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 cx.stop_propagation();
-                let copy = window.modifiers().control;
+                let copy = filer_shell::control_down();
                 this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
             }))
         })
@@ -289,12 +312,12 @@ impl Browser {
             self.suppress_click = true;
             match column {
                 Some(column) => self.clear_column(column, cx),
-                None => self.selection.clear(),
+                None => self.tab.selection.clear(),
             }
             self.begin_band(press.start, column, event.modifiers.control, cx);
             return;
         }
-        if !self.selection.contains(&press.path) {
+        if !self.tab.selection.contains(&press.path) {
             self.select_pressed(press.path.clone(), cx);
         }
         let Some((folder, names)) = self.selection_in_folder_of(&press.path) else { return };
@@ -327,7 +350,7 @@ impl Browser {
             match modal() {
                 Ok(MenuChoice::Rename) => {
                     let _ = this.update(cx, |browser, cx| {
-                        browser.rename_request = rename;
+                        browser.tab.rename_request = rename;
                         cx.notify();
                     });
                 }
@@ -342,6 +365,7 @@ impl Browser {
     fn selection_in_folder_of(&self, path: &Path) -> Option<(PathBuf, Vec<OsString>)> {
         let folder = path.parent()?.to_path_buf();
         let names = self
+            .tab
             .selection
             .paths()
             .iter()
@@ -352,7 +376,7 @@ impl Browser {
     }
 
     fn item_menu(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if !self.selection.contains(&path) {
+        if !self.tab.selection.contains(&path) {
             self.select_pressed(path.clone(), cx);
         }
         let Some((folder, names)) = self.selection_in_folder_of(&path) else { return };
@@ -386,18 +410,19 @@ impl Browser {
         let hwnd = self.hwnd;
         let (tx, rx) = futures::channel::oneshot::channel();
         let job = operation.clone();
+        let tab = self.tab.id;
         std::thread::spawn(move || {
             init_thread();
             let _ = tx.send(run_recording_undo(&job, Prompt::Windows { hwnd }));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("ファイル操作が途中で止まりました".to_string()));
-            let _ = this.update(cx, |browser, cx| browser.finish_operation(&operation, result, record_undo, cx));
+            let _ = this.update(cx, |browser, cx| browser.finish_operation(tab, &operation, result, record_undo, cx));
         })
         .detach();
     }
 
-    fn finish_operation(&mut self, operation: &Operation, result: Result<Option<Operation>, String>, record_undo: bool, cx: &mut Context<Self>) {
+    fn finish_operation(&mut self, tab: u64, operation: &Operation, result: Result<Option<Operation>, String>, record_undo: bool, cx: &mut Context<Self>) {
         match result {
             Ok(undo) => {
                 match undo {
@@ -406,20 +431,19 @@ impl Browser {
                     None if record_undo => self.undo.clear(),
                     _ => {}
                 }
-                if let Operation::NewFolder { parent, name } = operation {
-                    self.pending_rename = Some(parent.join(name));
-                }
                 if matches!(operation, Operation::Move { .. }) {
                     self.cut.clear();
                 }
-                self.message = None;
+                self.on_tab(tab, cx, |browser, _| {
+                    if let Operation::NewFolder { parent, name } = operation {
+                        browser.tab.pending_rename = Some(parent.join(name));
+                    }
+                    browser.tab.message = None;
+                });
             }
-            Err(message) => self.message = Some(message),
+            Err(message) => self.show_message_on(tab, message, cx),
         }
-        let panes = std::iter::once(self.pane.clone())
-            .chain(self.columns.iter().map(|column| column.pane.clone()))
-            .chain(self.expanded.values().cloned());
-        for pane in panes.collect::<Vec<_>>() {
+        for pane in self.all_panes() {
             pane.update(cx, |pane, cx| pane.reload(cx));
         }
         cx.notify();
@@ -432,13 +456,13 @@ impl Browser {
     }
 
     fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) {
-        if self.selection.is_empty() {
+        if self.tab.selection.is_empty() {
             return;
         }
-        let items = self.selection.top_level();
+        let items = self.tab.selection.top_level();
         match set_clipboard_files(&items, cut) {
             Ok(()) => self.cut = if cut { items.into_iter().collect() } else { HashSet::new() },
-            Err(message) => self.message = Some(message),
+            Err(message) => self.tab.message = Some(message),
         }
         cx.notify();
     }
@@ -451,22 +475,22 @@ impl Browser {
     /// グループの見出しのクリック。そのグループの項目をすべて選ぶ。
     pub fn select_group(&mut self, ordinal: usize, column: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(column) = column {
-            self.active_column = column;
+            self.tab.active_column = column;
         }
         let tree = self.active_tree(cx);
         let range = group_range(&tree, ordinal);
         let rows = self.visible_items(cx).into_iter();
         let members: Vec<PathBuf> = rows.filter(|(ix, _)| range.contains(ix)).map(|(_, path)| path).collect();
-        self.selection.select_all(&members);
+        self.tab.selection.select_all(&members);
         window.focus(&self.focus);
         cx.notify();
     }
 
     fn active_tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
-        match self.view.mode {
+        match self.tab.view.mode {
             ViewMode::List => self.tree(cx),
-            ViewMode::Columns => self.column_tree(self.active_column, cx),
-            ViewMode::Icons => Rc::new(Self::plain_tree(self.pane.read(cx), self.view.group).1),
+            ViewMode::Columns => self.column_tree(self.tab.active_column, cx),
+            ViewMode::Icons => Rc::new(Self::plain_tree(self.tab.pane.read(cx), self.tab.view.group).1),
         }
     }
 
@@ -479,7 +503,8 @@ impl Browser {
     /// ドラッグ中に、開く先の上で止まったら少し待って開く。
     pub fn hover_target(&mut self, target: SpringTarget, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
         let covered = matches!(target, SpringTarget::Folder(_)) && self.over_drag_bar(position);
-        let inside = bounds.contains(&position) && !covered;
+        let here = matches!(target, SpringTarget::Tab(id) if self.tab_is_current(id));
+        let inside = bounds.contains(&position) && !covered && !here;
         let current = self.spring.as_ref().is_some_and(|spring| spring.target == target && spring.bounds == bounds);
         if inside == current {
             return;
@@ -500,7 +525,7 @@ impl Browser {
     /// 開くまでの待ち時間。開き方ごとに設定できる。
     fn spring_delay(&self, target: &SpringTarget) -> u64 {
         match target {
-            SpringTarget::Folder(_) => match self.view.mode {
+            SpringTarget::Folder(_) => match self.tab.view.mode {
                 ViewMode::Columns => self.settings.spring_column_ms,
                 ViewMode::List => self.settings.spring_list_ms,
                 ViewMode::Icons => self.settings.spring_icons_ms,
@@ -520,12 +545,13 @@ impl Browser {
             SpringTarget::Back => self.back(cx),
             SpringTarget::Parent => self.parent(cx),
             SpringTarget::Go(path) => self.navigate(path, cx),
-            SpringTarget::Folder(path) => match self.view.mode {
+            SpringTarget::Tab(id) => self.switch_to_hovered(id, cx),
+            SpringTarget::Folder(path) => match self.tab.view.mode {
                 ViewMode::Columns => self.open_column_for(&path, cx),
                 ViewMode::List => {
-                    if !self.expanded.contains_key(&path) {
-                        let pane = self.new_pane(path.clone(), self.view.order, false, cx);
-                        self.expanded.insert(path, pane);
+                    if !self.tab.expanded.contains_key(&path) {
+                        let pane = self.new_pane(path.clone(), self.tab.view.order, false, cx);
+                        self.tab.expanded.insert(path, pane);
                     }
                 }
                 ViewMode::Icons => self.navigate(path, cx),
@@ -537,9 +563,9 @@ impl Browser {
     pub fn open_column_for(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(parent) = path.parent() else { return };
         let Some(name) = path.file_name() else { return };
-        let found = self.columns.iter().position(|column| column.pane.read(cx).state.path == parent);
+        let found = self.tab.columns.iter().position(|column| column.pane.read(cx).state.path == parent);
         let Some(column) = found else { return };
-        let state = &self.columns[column].pane.read(cx).state;
+        let state = &self.tab.columns[column].pane.read(cx).state;
         let Some(entry) = state.entries.iter().find(|entry| entry.os_name() == name).cloned() else { return };
         self.select_in_column(column, name.to_os_string(), entry, cx);
     }
@@ -554,7 +580,7 @@ impl Browser {
     pub fn begin_band(&mut self, position: Point<Pixels>, column: Option<usize>, control: bool, cx: &mut Context<Self>) {
         let Some(view) = self.band_viewport(column) else { return };
         let start = point(position.x - view.bounds.origin.x, position.y - view.bounds.origin.y - view.scroll);
-        let base = if control { self.selection.paths() } else { Vec::new() };
+        let base = if control { self.tab.selection.paths() } else { Vec::new() };
         self.band = Some(Band { start, current: position, column, base });
         self.band_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -568,16 +594,16 @@ impl Browser {
     }
 
     fn band_viewport(&self, column: Option<usize>) -> Option<BandViewport> {
-        let (bounds, scroll) = match self.view.mode {
+        let (bounds, scroll) = match self.tab.view.mode {
             ViewMode::List => {
-                let handle = self.list_scroll.0.borrow().base_handle.clone();
+                let handle = self.tab.list_scroll.0.borrow().base_handle.clone();
                 (handle.bounds(), handle.offset().y)
             }
             ViewMode::Columns => {
-                let handle = self.columns.get(column?)?.scroll.0.borrow().base_handle.clone();
+                let handle = self.tab.columns.get(column?)?.scroll.0.borrow().base_handle.clone();
                 (handle.bounds(), handle.offset().y)
             }
-            ViewMode::Icons => (self.grid_list.viewport_bounds(), self.grid_list.scroll_px_offset_for_scrollbar().y),
+            ViewMode::Icons => (self.tab.grid_list.viewport_bounds(), self.tab.grid_list.scroll_px_offset_for_scrollbar().y),
         };
         Some(BandViewport { bounds, scroll })
     }
@@ -603,11 +629,11 @@ impl Browser {
         if moved < theme::DRAG_THRESHOLD {
             return true;
         }
-        let hits = match self.view.mode {
+        let hits = match self.tab.view.mode {
             ViewMode::Icons => self.grid_hits(start, end, cx),
             ViewMode::List | ViewMode::Columns => {
                 if let Some(column) = column {
-                    self.active_column = column;
+                    self.tab.active_column = column;
                 }
                 let tree = self.active_tree(cx);
                 let rows = rows_in_band(start.y.into(), end.y.into(), theme::ROW_HEIGHT, tree.rows.len());
@@ -615,8 +641,8 @@ impl Browser {
                 items.filter(|(ix, _)| rows.contains(ix)).map(|(_, path)| path).collect()
             }
         };
-        self.selection.select_all(&[base, hits].concat());
-        self.selection.soften();
+        self.tab.selection.select_all(&[base, hits].concat());
+        self.tab.selection.soften();
         cx.notify();
         true
     }
@@ -626,13 +652,13 @@ impl Browser {
         let (y, top, bottom): (f32, f32, f32) = (cursor.y.into(), bounds.top().into(), bounds.bottom().into());
         let beyond = if y > bottom { y - bottom } else if y < top { y - top } else { return };
         let step = (beyond.abs().min(theme::BAND_SCROLL_LIMIT) * theme::BAND_SCROLL_SPEED).max(1.0) * beyond.signum();
-        let handle = match self.view.mode {
+        let handle = match self.tab.view.mode {
             ViewMode::Icons => {
-                self.grid_list.scroll_by(px(step));
+                self.tab.grid_list.scroll_by(px(step));
                 return;
             }
-            ViewMode::List => self.list_scroll.0.borrow().base_handle.clone(),
-            ViewMode::Columns => match column.and_then(|column| self.columns.get(column)) {
+            ViewMode::List => self.tab.list_scroll.0.borrow().base_handle.clone(),
+            ViewMode::Columns => match column.and_then(|column| self.tab.columns.get(column)) {
                 Some(column) => column.scroll.0.borrow().base_handle.clone(),
                 None => return,
             },
@@ -644,11 +670,11 @@ impl Browser {
 
     /// アイコン表示で枠に触れている項目。
     fn grid_hits(&self, start: Point<Pixels>, end: Point<Pixels>, cx: &Context<Self>) -> Vec<PathBuf> {
-        let Some(data) = &self.grid_data else { return Vec::new() };
-        let (cell_width, row_height) = grid_metrics(self.view.icon_size);
+        let Some(data) = &self.tab.grid_data else { return Vec::new() };
+        let (cell_width, row_height) = grid_metrics(self.tab.view.icon_size);
         let (left, right): (f32, f32) = (start.x.min(end.x).into(), start.x.max(end.x).into());
         let (top, bottom): (f32, f32) = (start.y.min(end.y).into(), start.y.max(end.y).into());
-        let state = &self.pane.read(cx).state;
+        let state = &self.tab.pane.read(cx).state;
         let mut hits = Vec::new();
         let mut y = 0.0;
         for row in data.rows.iter() {
@@ -659,7 +685,7 @@ impl Browser {
                         for (index, &entry) in cells.iter().enumerate() {
                             let x = theme::GRID_SIDE_PADDING + index as f32 * (cell_width + theme::GRID_CELL_GAP);
                             if let Some(entry) = state.entries.get(entry as usize)
-                                && grid_item_rects(entry, self.view.icon_size, x, y).iter().any(|rect| rect.touches(left, top, right, bottom))
+                                && grid_item_rects(entry, self.tab.view.icon_size, x, y).iter().any(|rect| rect.touches(left, top, right, bottom))
                             {
                                 hits.push(state.path.join(entry.os_name()));
                             }
@@ -706,7 +732,7 @@ impl Browser {
         let current = self.current_folder(cx);
         let mut ancestors: Vec<PathBuf> = current.ancestors().skip(1).take(theme::DRAG_BAR_SEGMENTS).map(PathBuf::from).collect();
         ancestors.reverse();
-        let back = self.history.can_go_back().then(|| Self::drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
+        let back = self.tab.history.can_go_back().then(|| Self::drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
         let segments: Vec<_> = ancestors
             .into_iter()
             .map(|path| {
@@ -758,9 +784,9 @@ impl Browser {
                 this.hover_target(target.clone(), event.bounds, event.event.position, cx);
             }))
             .when_some(drop, |segment, path| {
-                segment.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                segment.on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                     cx.stop_propagation();
-                    let copy = window.modifiers().control;
+                    let copy = filer_shell::control_down();
                     this.drop_paths(paths.paths(), path.clone(), copy, cx);
                 }))
             })
@@ -775,9 +801,9 @@ impl Browser {
     }
 
     fn recycle_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.selection.is_empty() {
-            let items = self.selection.top_level();
-            self.selection.clear();
+        if !self.tab.selection.is_empty() {
+            let items = self.tab.selection.top_level();
+            self.tab.selection.clear();
             self.perform(Operation::Recycle { items }, true, cx);
         }
     }
@@ -795,7 +821,7 @@ impl Browser {
             Some(dot) if dot > 0 && !path.is_dir() => dot,
             _ => name.len(),
         };
-        let wrap = (self.view.mode == ViewMode::Icons).then(|| theme::grid_label_width(self.view.icon_size));
+        let wrap = (self.tab.view.mode == ViewMode::Icons).then(|| theme::grid_label_width(self.tab.view.icon_size));
         let input = cx.new(|cx| TextInput::new(name, 0..stem, wrap, cx));
         let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
             InputEvent::Changed => {}
@@ -806,12 +832,12 @@ impl Browser {
         if let Some((row, _)) = self.visible_items(cx).iter().find(|(_, item)| *item == path) {
             self.reveal(*row);
         }
-        self.renaming = Some(Renaming { path, input, _subscription: subscription });
+        self.tab.renaming = Some(Renaming { path, input, _subscription: subscription });
         cx.notify();
     }
 
     fn end_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.renaming = None;
+        self.tab.renaming = None;
         remove_ime_caret();
         window.focus(&self.focus);
         cx.notify();
@@ -819,7 +845,7 @@ impl Browser {
 
     /// 編集中の名前を確定する。編集していなければ何もしない。
     pub fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(renaming) = &self.renaming else { return };
+        let Some(renaming) = &self.tab.renaming else { return };
         let name = renaming.input.read(cx).text();
         let item = renaming.path.clone();
         let unchanged = item.file_name().is_some_and(|old| old.to_string_lossy() == name);
@@ -831,14 +857,14 @@ impl Browser {
             self.show_message(format!("「{name}」は名前に使えません"), cx);
             return;
         }
-        self.selection.select_only(item.with_file_name(&name));
+        self.tab.selection.select_only(item.with_file_name(&name));
         self.perform(Operation::Rename { item, name }, true, cx);
     }
 
     fn reveal(&mut self, row: usize) {
-        match self.view.mode {
-            ViewMode::List => self.list_scroll.scroll_to_item(row, ScrollStrategy::Top),
-            ViewMode::Columns => self.columns[self.active_column].scroll.scroll_to_item(row, ScrollStrategy::Top),
+        match self.tab.view.mode {
+            ViewMode::List => self.tab.list_scroll.scroll_to_item(row, ScrollStrategy::Top),
+            ViewMode::Columns => self.tab.columns[self.tab.active_column].scroll.scroll_to_item(row, ScrollStrategy::Top),
             ViewMode::Icons => {}
         }
     }
@@ -846,11 +872,11 @@ impl Browser {
     fn move_selection(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
         let items = self.visible_items(cx);
         let ordered: Vec<PathBuf> = items.iter().map(|(_, path)| path.clone()).collect();
-        let Some(path) = self.selection.move_cursor(delta, extend, &ordered) else { return };
+        let Some(path) = self.tab.selection.move_cursor(delta, extend, &ordered) else { return };
         if let Some((row, _)) = items.iter().find(|(_, item)| *item == path) {
             self.reveal(*row);
         }
-        if self.view.mode == ViewMode::Columns && !extend {
+        if self.tab.view.mode == ViewMode::Columns && !extend {
             self.follow_in_column(&path, cx);
         }
         cx.notify();
@@ -858,36 +884,55 @@ impl Browser {
 
     /// カラムで選択を動かした時、右の列も追従させる。
     fn follow_in_column(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let column = self.active_column;
-        let state = &self.columns[column].pane.read(cx).state;
+        let column = self.tab.active_column;
+        let state = &self.tab.columns[column].pane.read(cx).state;
         let Some(name) = path.file_name() else { return };
         let Some(entry) = state.entries.iter().find(|entry| entry.os_name() == name).cloned() else { return };
         self.select_in_column(column, name.to_os_string(), entry, cx);
-        self.active_column = column;
+        self.tab.active_column = column;
     }
 
     fn step_column(&mut self, forward: bool, cx: &mut Context<Self>) {
         if forward {
-            if self.active_column + 1 < self.columns.len() {
-                self.active_column += 1;
-                self.selection.clear();
+            if self.tab.active_column + 1 < self.tab.columns.len() {
+                self.tab.active_column += 1;
+                self.tab.selection.clear();
                 self.move_selection(1, false, cx);
             }
-        } else if self.active_column > 0 {
-            self.active_column -= 1;
-            let column = &self.columns[self.active_column];
+        } else if self.tab.active_column > 0 {
+            self.tab.active_column -= 1;
+            let column = &self.tab.columns[self.tab.active_column];
             let folder = column.pane.read(cx).state.path.clone();
             if let Some(name) = column.selected.clone() {
-                self.selection.select_only(folder.join(name));
+                self.tab.selection.select_only(folder.join(name));
             }
-            self.columns.truncate(self.active_column + 2);
+            self.tab.columns.truncate(self.tab.active_column + 2);
             cx.notify();
         }
     }
 
+    /// タブのキー。名前の入力中や検索欄の中でも効かせる。
+    fn tab_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let keystroke = &event.keystroke;
+        if event.is_held || !keystroke.modifiers.control {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "t" => self.new_tab(window, cx),
+            "w" => self.close_tab(self.tabs.index(), window, cx),
+            "tab" => self.select_tab(self.tabs.neighbor(!keystroke.modifiers.shift), window, cx),
+            _ => return false,
+        }
+        true
+    }
+
     pub fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.selection.harden();
-        if self.renaming.is_some() || self.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window)) {
+        self.tab.selection.harden();
+        if self.tab_key(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.tab.renaming.is_some() || self.tab.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window)) {
             return;
         }
         let keystroke = &event.keystroke;
@@ -896,8 +941,8 @@ impl Browser {
             return;
         }
         let (control, shift, alt) = (keystroke.modifiers.control, keystroke.modifiers.shift, keystroke.modifiers.alt);
-        let rows = if self.view.mode == ViewMode::Icons { self.grid_per_row as isize } else { 1 };
-        let mode = self.view.mode;
+        let rows = if self.tab.view.mode == ViewMode::Icons { self.tab.grid_per_row as isize } else { 1 };
+        let mode = self.tab.view.mode;
         match keystroke.key.as_str() {
             "up" if alt => self.parent(cx),
             "left" if alt => self.back(cx),
@@ -910,7 +955,7 @@ impl Browser {
             "right" if mode == ViewMode::Columns => self.step_column(true, cx),
             "enter" => self.open_selection(cx),
             "backspace" => self.back(cx),
-            "escape" if self.search_box.is_some() => self.drop_search(cx),
+            "escape" if self.tab.search_box.is_some() => self.drop_search(cx),
             "escape" => {
                 self.cut.clear();
                 self.clear_selection(cx);
@@ -918,14 +963,14 @@ impl Browser {
             "f" if control => self.open_search(window, cx),
             "delete" => self.recycle_selection(cx),
             "f2" => {
-                if let [path] = self.selection.paths().as_slice() {
+                if let [path] = self.tab.selection.paths().as_slice() {
                     self.begin_rename(path.clone(), window, cx);
                 }
             }
-            "f5" => self.pane.update(cx, |pane, cx| pane.reload(cx)),
+            "f5" => self.tab.pane.update(cx, |pane, cx| pane.reload(cx)),
             "a" if control => {
                 let ordered = self.ordered_paths(cx);
-                self.selection.select_all(&ordered);
+                self.tab.selection.select_all(&ordered);
                 cx.notify();
             }
             "c" if control => self.copy_selection(false, cx),

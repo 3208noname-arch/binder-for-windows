@@ -5,7 +5,7 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCandidateWindow, ImmSetCompositionWindow,
 };
 use windows::Win32::Graphics::Gdi::ScreenToClient;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{CreateCaret, DestroyCaret, GetCursorPos, SetCaretPos};
 
 /// IMEのモード表示と変換候補が文字カーソルの真下に出るよう、見えないキャレットと位置を渡す。
@@ -39,6 +39,12 @@ pub fn cursor_position(hwnd: isize) -> Option<(i32, i32)> {
         ScreenToClient(HWND(hwnd as *mut c_void), &mut point).ok().ok()?;
     }
     Some((point.x, point.y))
+}
+
+/// Ctrlが押されているか。ドラッグの間はキーの通知が届かないので、ドロップの時はこちらで調べる。
+pub fn control_down() -> bool {
+    let state = unsafe { GetAsyncKeyState(i32::from(VK_CONTROL.0)) };
+    state < 0
 }
 
 /// 左ボタンが押されているか。ウィンドウの外で離しても分かる。

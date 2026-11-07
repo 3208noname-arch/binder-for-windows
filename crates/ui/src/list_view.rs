@@ -41,43 +41,43 @@ impl Browser {
 
     /// 今の行の並び。開いているフォルダの子を親の下へ展開する。中身が変わるまでは作り直さない。
     pub fn tree(&mut self, cx: &Context<Self>) -> Rc<Flattened> {
-        let root = self.pane.read(cx);
+        let root = self.tab.pane.read(cx);
         let today = today();
         let key = TreeKey {
             root_version: root.version,
-            expanded_version: self.expanded.values().map(|pane| pane.read(cx).version).sum(),
-            expanded_count: self.expanded.len(),
-            group: self.view.group,
+            expanded_version: self.tab.expanded.values().map(|pane| pane.read(cx).version).sum(),
+            expanded_count: self.tab.expanded.len(),
+            group: self.tab.view.group,
             today,
         };
-        if let Some((cached, tree)) = &self.tree_cache
+        if let Some((cached, tree)) = &self.tab.tree_cache
             && *cached == key
         {
             return tree.clone();
         }
         let mut lists: HashMap<PathBuf, &[Entry]> = HashMap::new();
         lists.insert(root.state.path.clone(), &root.state.entries);
-        for (path, pane) in &self.expanded {
+        for (path, pane) in &self.tab.expanded {
             lists.insert(path.clone(), &pane.read(cx).state.entries);
         }
-        let tree = Rc::new(tree_for(root, &lists, self.view.group, today));
-        self.tree_cache = Some((key, tree.clone()));
+        let tree = Rc::new(tree_for(root, &lists, self.tab.view.group, today));
+        self.tab.tree_cache = Some((key, tree.clone()));
         tree
     }
 
     fn list_entry(&self, folder: &Path, index: usize, cx: &Context<Self>) -> Option<Entry> {
-        let root = self.pane.read(cx);
-        let pane = if root.state.path == folder { root } else { self.expanded.get(folder)?.read(cx) };
+        let root = self.tab.pane.read(cx);
+        let pane = if root.state.path == folder { root } else { self.tab.expanded.get(folder)?.read(cx) };
         pane.state.entries.get(index).cloned()
     }
 
     fn toggle_expanded(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.expanded.remove(&path).is_none() {
-            let pane = self.new_pane(path.clone(), self.view.order, false, cx);
-            self.expanded.insert(path, pane);
+        if self.tab.expanded.remove(&path).is_none() {
+            let pane = self.new_pane(path.clone(), self.tab.view.order, false, cx);
+            self.tab.expanded.insert(path, pane);
         } else {
             // 閉じたフォルダの中で開いていた分も閉じる
-            self.expanded.retain(|key, _| !key.starts_with(&path));
+            self.tab.expanded.retain(|key, _| !key.starts_with(&path));
         }
         cx.notify();
     }
@@ -85,7 +85,7 @@ impl Browser {
     /// 1つの項目のセルの文字列。
     fn field_text(&mut self, field: Field, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> String {
         let properties = || {
-            let root = self.pane.read(cx);
+            let root = self.tab.pane.read(cx);
             (root.state.path == folder).then(|| root.properties.get(entry.os_name()).cloned()).flatten()
         };
         match field {
@@ -111,16 +111,16 @@ impl Browser {
 
     /// 項目の境界のダブルクリック。いちばん長い中身に合わせる。
     fn fit_field(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(column) = self.view.columns.get(index).copied() else { return };
+        let Some(column) = self.tab.view.columns.get(index).copied() else { return };
         let width = if column.field == Field::Name {
-            let root = self.pane.read(cx);
+            let root = self.tab.pane.read(cx);
             let lists = std::iter::once(&root.state.entries)
-                .chain(self.expanded.values().map(|pane| &pane.read(cx).state.entries));
+                .chain(self.tab.expanded.values().map(|pane| &pane.read(cx).state.entries));
             let names = lists.flatten().map(|entry| entry.name.as_str());
             fit_width(names, theme::TEXT_SIZE, theme::NAME_FIT_PADDING)
         } else {
-            let folder = self.pane.read(cx).state.path.clone();
-            let entries = self.pane.read(cx).state.entries.clone();
+            let folder = self.tab.pane.read(cx).state.path.clone();
+            let entries = self.tab.pane.read(cx).state.entries.clone();
             let known_size = |entry: &Entry, this: &Self, cx: &Context<Self>| {
                 let size = this.sizes.read(cx).peek(&folder.join(entry.os_name()));
                 size.map_or("--".to_string(), format_size)
@@ -142,8 +142,8 @@ impl Browser {
         let x: f32 = event.position.x.into();
         match self.resizing {
             Some(Resize::Field { index, start_x, start_width }) => {
-                self.view.resize_column(index, start_width + x - start_x);
-                self.columns[0].view = self.view.clone();
+                self.tab.view.resize_column(index, start_width + x - start_x);
+                self.tab.columns[0].view = self.tab.view.clone();
                 cx.notify();
             }
             Some(Resize::Column { column, start_x, start_width }) => self.resize_column_view(column, start_width + x - start_x, cx),
@@ -153,15 +153,15 @@ impl Browser {
 
     /// 窓の座標から、見出しのどの位置かを求める。
     fn header_position(&self, x: f32) -> usize {
-        let offset: f32 = self.list_columns_scroll.offset().x.into();
+        let offset: f32 = self.tab.list_columns_scroll.offset().x.into();
         let mut edge = theme::SIDEBAR_WIDTH + theme::ROW_SIDE_PADDING + offset;
-        for (index, column) in self.view.columns.iter().enumerate() {
+        for (index, column) in self.tab.view.columns.iter().enumerate() {
             edge += column.width + theme::FIELD_GAP;
             if x < edge {
                 return index;
             }
         }
-        self.view.columns.len().saturating_sub(1)
+        self.tab.view.columns.len().saturating_sub(1)
     }
 
     pub fn drag_header(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -179,7 +179,7 @@ impl Browser {
         match drag.target {
             Some(target) => self.update_view(cx, |view| view.move_column(drag.index, target)),
             None => {
-                let key = self.view.columns.get(drag.index).and_then(|c| c.field.sort_key());
+                let key = self.tab.view.columns.get(drag.index).and_then(|c| c.field.sort_key());
                 if let Some(key) = key {
                     self.toggle_sort(key, cx);
                 }
@@ -188,8 +188,8 @@ impl Browser {
     }
 
     fn header_cell(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let column = self.view.columns[index];
-        let order = self.view.order;
+        let column = self.tab.view.columns[index];
+        let order = self.tab.view.order;
         let mark = match (column.field.sort_key() == Some(order.key), order.descending) {
             (false, _) => "",
             (true, false) => " ▲",
@@ -249,7 +249,7 @@ impl Browser {
 
     /// 名前の表示。編集中なら入力欄を出す。
     pub fn name_or_input(&self, path: &Path, entry: &Entry) -> AnyElement {
-        match &self.renaming {
+        match &self.tab.renaming {
             Some(renaming) if renaming.path == path => div().flex_1().min_w_0().child(renaming.input.clone()).into_any_element(),
             _ => div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()).into_any_element(),
         }
@@ -257,12 +257,12 @@ impl Browser {
 
     fn name_cell(&mut self, depth: u32, folder: &Path, entry: &Entry, path: &Path, sub_text: u32, cx: &mut Context<Self>) -> AnyElement {
         let is_dir = entry.is_dir;
-        let expanded = self.expanded.get(path);
+        let expanded = self.tab.expanded.get(path);
         let note = expanded.and_then(|pane| pane.read(cx).state.note());
         let expanded = expanded.is_some();
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
         let slot = div().flex_none().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
-        let disclosure = if is_dir && self.search_run.is_none() {
+        let disclosure = if is_dir && self.tab.search_run.is_none() {
             let target = path.to_path_buf();
             slot.id(gpui::ElementId::Name(format!("open-{}", path.display()).into()))
                 .cursor(CursorStyle::PointingHand)
@@ -275,7 +275,7 @@ impl Browser {
         } else {
             slot.into_any_element()
         };
-        let renaming = self.renaming.as_ref().is_some_and(|renaming| renaming.path == path);
+        let renaming = self.tab.renaming.as_ref().is_some_and(|renaming| renaming.path == path);
         let label = div()
             .flex()
             .items_center()
@@ -300,7 +300,7 @@ impl Browser {
 
     fn list_row(&mut self, ix: usize, depth: u32, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
-        let selected = self.selection.contains(&path);
+        let selected = self.tab.selection.contains(&path);
         let (selected_background, selected_text) = self.selection_colors();
         let background = match (selected, ix % 2 == 1) {
             (true, _) => selected_background,
@@ -310,7 +310,7 @@ impl Browser {
         let sub_text = if selected { selected_text } else { theme::SUB_TEXT };
         let text = if selected { selected_text } else { theme::TEXT };
         let is_dir = entry.is_dir;
-        let columns = self.view.columns.clone();
+        let columns = self.tab.view.columns.clone();
         let cells: Vec<_> = columns
             .iter()
             .map(|column| {
@@ -358,8 +358,8 @@ impl Browser {
     }
 
     pub fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let cells: Vec<_> = (0..self.view.columns.len()).map(|index| self.header_cell(index, cx)).collect();
-        let total: f32 = self.view.columns.iter().map(|c| c.width + theme::FIELD_GAP).sum::<f32>() + theme::ROW_SIDE_PADDING * 2.0;
+        let cells: Vec<_> = (0..self.tab.view.columns.len()).map(|index| self.header_cell(index, cx)).collect();
+        let total: f32 = self.tab.view.columns.iter().map(|c| c.width + theme::FIELD_GAP).sum::<f32>() + theme::ROW_SIDE_PADDING * 2.0;
         let header = div()
             .flex()
             .flex_none()
@@ -383,7 +383,7 @@ impl Browser {
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
-            .track_scroll(&self.list_columns_scroll)
+            .track_scroll(&self.tab.list_columns_scroll)
             .cursor(CursorStyle::Crosshair)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
@@ -402,7 +402,7 @@ impl Browser {
                             count,
                             cx.processor(move |this, range, _: &mut Window, cx| this.list_rows(&tree, range, cx)),
                         )
-                        .track_scroll(self.list_scroll.clone())
+                        .track_scroll(self.tab.list_scroll.clone())
                         .size_full(),
                     ),
                 ),

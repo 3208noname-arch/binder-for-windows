@@ -11,7 +11,7 @@ mod time;
 mod watch;
 
 pub use context_menu::{MenuChoice, drag_items, preload_items_menu, show_folder_menu, show_items_menu};
-pub use ime::{cursor_position, left_button_down, place_ime_caret, remove_ime_caret};
+pub use ime::{control_down, cursor_position, left_button_down, place_ime_caret, remove_ime_caret};
 pub use watch::{WatchJob, watch_folder};
 
 pub use enumerate::{FolderSize, ListEvent, ListJob, folder_size, long_path, should_flush, start_list, start_search};

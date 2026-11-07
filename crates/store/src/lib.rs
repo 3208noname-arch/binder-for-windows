@@ -1,6 +1,6 @@
 //! 設定をSQLite 1ファイルへ保存する部品。
 
-use filer_core::{AppSettings, FolderView};
+use filer_core::{AppSettings, FolderView, TabSession};
 use std::path::Path;
 
 /// フォルダごとの表示の設定を持つ。
@@ -23,6 +23,10 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)",
             [],
         )?;
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS tab_session (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)",
+            [],
+        )?;
         Ok(Self { connection })
     }
 
@@ -37,6 +41,22 @@ impl Store {
         let text = serde_json::to_string(settings).expect("設定は必ず文字列にできる");
         self.connection.execute(
             "INSERT INTO app_settings (id, value) VALUES (1, ?1)
+             ON CONFLICT (id) DO UPDATE SET value = excluded.value",
+            [text],
+        )?;
+        Ok(())
+    }
+
+    /// 前回のタブ。保存が無い時と、壊れていて読めない時は `None`。
+    pub fn tab_session(&self) -> Option<TabSession> {
+        let text: String = self.connection.query_row("SELECT value FROM tab_session WHERE id = 1", [], |row| row.get(0)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    pub fn save_tab_session(&self, session: &TabSession) -> rusqlite::Result<()> {
+        let text = serde_json::to_string(session).expect("タブの並びは必ず文字列にできる");
+        self.connection.execute(
+            "INSERT INTO tab_session (id, value) VALUES (1, ?1)
              ON CONFLICT (id) DO UPDATE SET value = excluded.value",
             [text],
         )?;
@@ -71,7 +91,39 @@ fn key(folder: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filer_core::{GroupKey, ViewMode};
+    use filer_core::{GroupKey, SavedTab, ViewMode};
+
+    #[test]
+    fn tab_session_comes_back_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.sqlite");
+        let tabs = vec![
+            SavedTab { path: r"C:\素材".into(), mode: ViewMode::Columns },
+            SavedTab { path: r"D:\".into(), mode: ViewMode::Icons },
+        ];
+        let session = TabSession { tabs, active: 1 };
+        Store::open(&file).unwrap().save_tab_session(&session).unwrap();
+        assert_eq!(Store::open(&file).unwrap().tab_session(), Some(session));
+    }
+
+    #[test]
+    fn saving_tabs_twice_keeps_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("s.sqlite")).unwrap();
+        store.save_tab_session(&TabSession::default()).unwrap();
+        let session = TabSession { tabs: vec![SavedTab { path: "a".into(), mode: ViewMode::List }], active: 0 };
+        store.save_tab_session(&session).unwrap();
+        assert_eq!(store.tab_session(), Some(session));
+    }
+
+    #[test]
+    fn missing_or_broken_tab_session_is_treated_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("s.sqlite")).unwrap();
+        assert_eq!(store.tab_session(), None);
+        store.connection.execute("INSERT INTO tab_session VALUES (1, 'not json')", []).unwrap();
+        assert_eq!(store.tab_session(), None);
+    }
 
     #[test]
     fn app_settings_come_back_after_reopening() {

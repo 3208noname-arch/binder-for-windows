@@ -1,20 +1,19 @@
-use crate::actions::{Band, Renaming, RowPress, Spring, SpringTarget};
+use crate::actions::{Band, RowPress, Spring, SpringTarget};
 use crate::scrollbar::{BarFade, IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::settings_view::{SettingsModel, SettingsView};
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
-use crate::icons_view::GridData;
 use crate::list_tree::Flattened;
-use crate::search::{SearchBox, SearchRun};
 use crate::size_cache::SizeCache;
+use crate::tabs::Tab;
 use crate::theme;
 use filer_core::{
-    AppSettings, Date, Entry, Field, FolderView, GroupKey, History, Selection, SortKey, SortOrder, ViewMode,
+    AppSettings, Date, Entry, Field, FolderView, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
 use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, ListAlignment, ListState,
+    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
     MouseButton, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
     WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
@@ -75,35 +74,21 @@ pub struct TreeKey {
 
 /// ウィンドウ全体。履歴と表示の設定を持ち、3つの表示へ分ける。
 pub struct Browser {
-    pub history: History,
-    pub view: FolderView,
+    /// 選んでいるタブ。一覧の見え方に関わる状態はここにある
+    pub tab: Tab,
+    /// 選んでいないタブの並び
+    pub tabs: TabList<Tab>,
+    pub tab_ids: u64,
+    /// 真なら、タブの並びを次回の起動のために残す
+    pub keeps_session: bool,
+    pub saved_session: Option<TabSession>,
     pub store: Option<Store>,
-    pub pane: Entity<FolderPane>,
-    pub selection: Selection,
     pub hwnd: isize,
     pub focus: FocusHandle,
-    pub message: Option<String>,
-    pub renaming: Option<Renaming>,
-    pub search_box: Option<SearchBox>,
-    pub search_run: Option<SearchRun>,
     /// 次の描画で、一覧へフォーカスを戻す
     pub refocus: bool,
-    pub pending_rename: Option<PathBuf>,
     pub press: Option<RowPress>,
     pub undo: Vec<Operation>,
-    pub grid_per_row: usize,
-    pub synced_version: u64,
-    pub list_scroll: UniformListScrollHandle,
-    pub list_columns_scroll: ScrollHandle,
-    pub grid_list: ListState,
-    pub grid_data: Option<GridData>,
-    pub columns: Vec<Column>,
-    pub columns_scroll: ScrollHandle,
-    pub active_column: usize,
-    /// ダブルクリックで開き、左端に寄せている列
-    pub column_anchor: Option<usize>,
-    /// 次の描画で、右端の列が見えるよう横へ送る
-    pub columns_reveal: bool,
     pub resizing: Option<Resize>,
     pub header_drag: Option<HeaderDrag>,
     pub settings: AppSettings,
@@ -115,7 +100,6 @@ pub struct Browser {
     pub band_task: Option<Task<()>>,
     pub scale: f32,
     pub viewport: Size<Pixels>,
-    pub bars: HashMap<ScrollTarget, BarFade>,
     bars_wake: Option<(Instant, Task<()>)>,
     drag_seen: bool,
     pub cut: HashSet<PathBuf>,
@@ -126,13 +110,9 @@ pub struct Browser {
     pub icon_size_drag: Option<IconSizeDrag>,
     pub sidebar_scroll: ScrollHandle,
     pub hovered_cell: Option<PathBuf>,
-    pub rename_request: Option<PathBuf>,
     pub drive_labels: HashMap<PathBuf, String>,
     pub menu: Option<Menu>,
-    pub tree_cache: Option<(TreeKey, Rc<Flattened>)>,
     pub window_active: bool,
-    pub preview: Option<(PathBuf, Entry)>,
-    pub expanded: HashMap<PathBuf, Entity<FolderPane>>,
     pub icons: Entity<IconCache>,
     pub sizes: Entity<SizeCache>,
     favorites: Vec<(String, PathBuf)>,
@@ -140,8 +120,10 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// `restore` が真なら前回のタブを開き、`path` は保存が無い時だけ使う。
     pub fn new(
         path: PathBuf,
+        restore: bool,
         mode: Option<ViewMode>,
         store: Option<Store>,
         measure: Option<Instant>,
@@ -164,7 +146,12 @@ impl Browser {
             cx.notify();
         })
         .detach();
-        let mut view = FolderView::for_folder(saved_view(&store, &path), ViewMode::List);
+        let session = store.as_ref().filter(|_| restore).and_then(Store::tab_session).and_then(TabSession::split);
+        let (left, right, path, start_mode) = match session {
+            Some((left, current, right)) => (left, right, PathBuf::from(current.path), current.mode),
+            None => (Vec::new(), Vec::new(), path, ViewMode::List),
+        };
+        let mut view = FolderView::for_folder(saved_view(&store, &path), start_mode);
         if let Some(mode) = mode {
             view.mode = mode;
         }
@@ -183,32 +170,17 @@ impl Browser {
         let sizes = cx.new(SizeCache::new);
         cx.observe(&sizes, |_, _, cx| cx.notify()).detach();
         let mut browser = Self {
-            history: History::new(path),
-            view,
+            tab: Tab::new(0, path, view, pane, true),
+            tabs: TabList::default(),
+            tab_ids: 0,
+            keeps_session: restore,
+            saved_session: None,
             store,
-            pane,
-            selection: Selection::default(),
             hwnd: window_handle(window),
             focus: focus.clone(),
-            message: None,
-            renaming: None,
-            search_box: None,
-            search_run: None,
             refocus: false,
-            pending_rename: None,
             press: None,
             undo: Vec::new(),
-            grid_per_row: 1,
-            synced_version: 0,
-            list_scroll: UniformListScrollHandle::new(),
-            list_columns_scroll: ScrollHandle::new(),
-            grid_list: ListState::new(0, ListAlignment::Top, px(theme::ROW_HEIGHT * 10.)),
-            grid_data: None,
-            columns: Vec::new(),
-            columns_scroll: ScrollHandle::new(),
-            active_column: 0,
-            column_anchor: None,
-            columns_reveal: false,
             resizing: None,
             header_drag: None,
             settings,
@@ -219,7 +191,6 @@ impl Browser {
             band_task: None,
             scale: window.scale_factor(),
             viewport: window.viewport_size(),
-            bars: HashMap::new(),
             bars_wake: None,
             drag_seen: false,
             cut: HashSet::new(),
@@ -230,18 +201,15 @@ impl Browser {
             icon_size_drag: None,
             sidebar_scroll: ScrollHandle::new(),
             hovered_cell: None,
-            rename_request: None,
             drive_labels: HashMap::new(),
             menu: None,
-            tree_cache: None,
             window_active: true,
-            preview: None,
-            expanded: HashMap::new(),
             icons,
             sizes,
             favorites: favorites(),
             drives: drives(),
         };
+        browser.restore_tabs(left, right, cx);
         browser.reset_columns(cx);
         browser.load_in_background(cx);
         browser
@@ -301,12 +269,7 @@ impl Browser {
     }
 
     fn apply_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
-        let saved = self.search_run.iter().flat_map(|run| run.panes()).cloned();
-        let panes = std::iter::once(self.pane.clone())
-            .chain(self.columns.iter().map(|column| column.pane.clone()))
-            .chain(self.expanded.values().cloned())
-            .chain(saved);
-        for pane in panes.collect::<Vec<_>>() {
+        for pane in self.all_panes() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
         }
     }
@@ -316,13 +279,13 @@ impl Browser {
         let now = Instant::now();
         for target in ScrollTarget::FIXED {
             let offset = self.bar_offset(target);
-            self.bars.entry(target).or_default().observe(offset, now);
+            self.tab.bars.entry(target).or_default().observe(offset, now);
         }
-        for index in 0..self.columns.len() {
+        for index in 0..self.tab.columns.len() {
             let offset = self.bar_offset(ScrollTarget::Column(index));
-            self.columns[index].bar.observe(offset, now);
+            self.tab.columns[index].bar.observe(offset, now);
         }
-        let fades = || self.bars.values().chain(self.columns.iter().map(|column| &column.bar));
+        let fades = || self.tab.bars.values().chain(self.tab.columns.iter().map(|column| &column.bar));
         if fades().any(|bar| bar.fading(now)) {
             window.request_animation_frame();
             return;
@@ -351,20 +314,20 @@ impl Browser {
 
     /// 開くフォルダ用に、そのフォルダの保存済みの設定を読む。
     pub fn view_of(&self, path: &Path) -> FolderView {
-        FolderView::for_folder(saved_view(&self.store, path), self.view.mode)
+        FolderView::for_folder(saved_view(&self.store, path), self.tab.view.mode)
     }
 
     /// 列を作り直す。カラム表示では親の列も並べ、開いたフォルダを左端に寄せる。
     fn reset_columns(&mut self, cx: &mut Context<Self>) {
-        let mut previous = std::mem::take(&mut self.columns);
+        let mut previous = std::mem::take(&mut self.tab.columns);
         let mut columns = Vec::new();
-        if self.view.mode == ViewMode::Columns {
-            let path = self.history.current().to_path_buf();
+        if self.tab.view.mode == ViewMode::Columns {
+            let path = self.tab.history.current().to_path_buf();
             let mut chain: Vec<&Path> = path.ancestors().collect();
             chain.reverse();
             for pair in chain.windows(2) {
                 let (folder, child) = (pair[0], pair[1]);
-                let reused = previous.iter().position(|column| column.pane != self.pane && column.pane.read(cx).state.path == folder);
+                let reused = previous.iter().position(|column| column.pane != self.tab.pane && column.pane.read(cx).state.path == folder);
                 let mut column = match reused {
                     Some(index) => previous.remove(index),
                     None => {
@@ -376,34 +339,34 @@ impl Browser {
                 columns.push(column);
             }
         }
-        columns.push(Column::new(self.pane.clone(), self.view.clone()));
-        self.active_column = columns.len() - 1;
-        self.column_anchor = (self.active_column > 0).then_some(self.active_column);
-        self.columns_reveal = true;
-        self.columns = columns;
-        self.preview = None;
+        columns.push(Column::new(self.tab.pane.clone(), self.tab.view.clone()));
+        self.tab.active_column = columns.len() - 1;
+        self.tab.column_anchor = (self.tab.active_column > 0).then_some(self.tab.active_column);
+        self.tab.columns_reveal = true;
+        self.tab.columns = columns;
+        self.tab.preview = None;
     }
 
     /// 履歴を増やして移動する。
     pub fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.history.visit(path.clone());
+        self.tab.history.visit(path.clone());
         self.show(path, cx);
     }
 
-    fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.drop_search(cx);
-        self.selection.clear();
-        self.message = None;
+        self.tab.selection.clear();
+        self.tab.message = None;
         self.menu = None;
-        self.renaming = None;
-        self.expanded.clear();
+        self.tab.renaming = None;
+        self.tab.expanded.clear();
         self.sizes.update(cx, |sizes, _| sizes.cancel_running());
-        self.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
-        self.grid_list.reset(0);
-        self.grid_data = None;
-        self.view = self.view_of(&path);
-        let (order, wants) = (self.view.order, self.view.needs_properties());
-        self.pane.update(cx, |pane, cx| {
+        self.tab.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.tab.grid_list.reset(0);
+        self.tab.grid_data = None;
+        self.tab.view = self.view_of(&path);
+        let (order, wants) = (self.tab.view.order, self.tab.view.needs_properties());
+        self.tab.pane.update(cx, |pane, cx| {
             pane.state.order = order;
             pane.set_wants_properties(wants, cx);
             pane.open(path, cx);
@@ -417,13 +380,13 @@ impl Browser {
         if self.leave_pinned_column(cx) {
             return;
         }
-        if let Some(path) = self.history.go_back().map(PathBuf::from) {
+        if let Some(path) = self.tab.history.go_back().map(PathBuf::from) {
             self.show(path, cx);
         }
     }
 
     pub fn forward(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.history.go_forward().map(PathBuf::from) {
+        if let Some(path) = self.tab.history.go_forward().map(PathBuf::from) {
             self.show(path, cx);
         }
     }
@@ -440,29 +403,29 @@ impl Browser {
 
     /// 操作中の列が、履歴の現在地より深い列か。
     fn in_child_column(&self) -> bool {
-        self.view.mode == ViewMode::Columns && self.columns[self.active_column].pane != self.pane
+        self.tab.view.mode == ViewMode::Columns && self.tab.columns[self.tab.active_column].pane != self.tab.pane
     }
 
     /// 開いているフォルダの設定を変え、すぐ保存する。カラム表示では操作中の列が対象。
     pub fn update_view(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut FolderView)) {
         let in_child_column = self.in_child_column();
         let (order, wants, pane) = if in_child_column {
-            let column = &mut self.columns[self.active_column];
+            let column = &mut self.tab.columns[self.tab.active_column];
             change(&mut column.view);
             (column.view.order, column.view.needs_properties(), column.pane.clone())
         } else {
-            change(&mut self.view);
-            if let Some(column) = self.columns.iter_mut().find(|column| column.pane == self.pane) {
-                column.view = self.view.clone();
+            change(&mut self.tab.view);
+            if let Some(column) = self.tab.columns.iter_mut().find(|column| column.pane == self.tab.pane) {
+                column.view = self.tab.view.clone();
             }
-            (self.view.order, self.view.needs_properties(), self.pane.clone())
+            (self.tab.view.order, self.tab.view.needs_properties(), self.tab.pane.clone())
         };
         pane.update(cx, |pane, cx| {
             pane.set_order(order, cx);
             pane.set_wants_properties(wants, cx);
         });
         if !in_child_column {
-            for child in self.expanded.values() {
+            for child in self.tab.expanded.values() {
                 child.update(cx, |pane, cx| pane.set_order(order, cx));
             }
         }
@@ -473,12 +436,12 @@ impl Browser {
     /// 幅のドラッグの終わりなど、値を変えた後で保存する。
     pub fn save_active_view(&self, cx: &Context<Self>) {
         // 検索の結果の表示は、そのフォルダの設定ではない
-        let Some(store) = self.store.as_ref().filter(|_| self.search_run.is_none()) else { return };
+        let Some(store) = self.store.as_ref().filter(|_| self.tab.search_run.is_none()) else { return };
         let result = if self.in_child_column() {
-            let column = &self.columns[self.active_column];
+            let column = &self.tab.columns[self.tab.active_column];
             store.save_folder_view(&column.pane.read(cx).state.path, &column.view)
         } else {
-            store.save_folder_view(self.history.current(), &self.view)
+            store.save_folder_view(self.tab.history.current(), &self.tab.view)
         };
         if let Err(error) = result {
             eprintln!("表示の設定を保存できませんでした: {error}");
@@ -495,11 +458,11 @@ impl Browser {
     /// 表示形式を変える。見ていたフォルダはそのまま引き継ぐ。
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
         self.drop_search(cx);
-        if mode == self.view.mode {
+        if mode == self.tab.view.mode {
             return;
         }
         let location = self.current_folder(cx);
-        if location != self.history.current() {
+        if location != self.tab.history.current() {
             self.navigate(location, cx);
         }
         self.update_view(cx, |view| view.mode = mode);
@@ -508,12 +471,12 @@ impl Browser {
 
     /// 並べ替えとグループの対象になっているフォルダの設定。
     fn active_view(&self) -> &FolderView {
-        if self.in_child_column() { &self.columns[self.active_column].view } else { &self.view }
+        if self.in_child_column() { &self.tab.columns[self.tab.active_column].view } else { &self.tab.view }
     }
 
     /// 選択の色。別のウィンドウへ移った時は灰色にする。
     pub fn selection_colors(&self) -> (u32, u32) {
-        if self.selection.is_soft() {
+        if self.tab.selection.is_soft() {
             (theme::SELECTED_SOFT, theme::TEXT)
         } else if self.window_active {
             (theme::SELECTED, theme::SELECTED_TEXT)
@@ -523,7 +486,7 @@ impl Browser {
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selection.clear();
+        self.tab.selection.clear();
         self.menu = None;
         cx.notify();
     }
@@ -660,7 +623,7 @@ impl Browser {
     }
 
     fn segment(&self, id: &'static str, label: &'static str, mode: ViewMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let active = self.view.mode == mode;
+        let active = self.tab.view.mode == mode;
         div()
             .id(id)
             .px_2()
@@ -760,7 +723,7 @@ impl Browser {
         Field::ALL
             .iter()
             .map(|&field| {
-                Self::menu_item(format!("field-{field:?}"), field.label().into(), self.view.has_field(field))
+                Self::menu_item(format!("field-{field:?}"), field.label().into(), self.tab.view.has_field(field))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.update_view(cx, |view| view.toggle_field(field));
                     }))
@@ -771,7 +734,7 @@ impl Browser {
 
     fn open_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let top = px(theme::TOOLBAR_HEIGHT);
-        let shift = if self.search_box.is_some() { theme::SEARCH_FIELD_WIDTH - theme::SEARCH_BUTTON_WIDTH } else { 0. };
+        let shift = if self.tab.search_box.is_some() { theme::SEARCH_FIELD_WIDTH - theme::SEARCH_BUTTON_WIDTH } else { 0. };
         Some(match self.menu? {
             Menu::Sort => {
                 let items = self.sort_menu(cx);
@@ -795,7 +758,7 @@ impl Browser {
             |name| name.to_string_lossy().into_owned(),
         );
         let pinned = self.column_pinned();
-        let (back, forward, up) = (self.history.can_go_back() || pinned, self.history.can_go_forward(), current.parent().is_some() || pinned);
+        let (back, forward, up) = (self.tab.history.can_go_back() || pinned, self.tab.history.can_go_forward(), current.parent().is_some() || pinned);
         let parent_folder = current.parent().map(PathBuf::from);
         let active = self.active_view();
         let sort = format!("並べ替え: {} ▾", active.order.key.label());
@@ -828,9 +791,9 @@ impl Browser {
                     .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                         this.hover_target(SpringTarget::Parent, event.bounds, event.event.position, cx);
                     }))
-                    .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                    .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                         cx.stop_propagation();
-                        let copy = window.modifiers().control;
+                        let copy = filer_shell::control_down();
                         if let Some(target) = target.clone() {
                             this.drop_paths(paths.paths(), target, copy, cx);
                         }
@@ -857,7 +820,7 @@ impl Browser {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
             )
-            .child(match &self.search_box {
+            .child(match &self.tab.search_box {
                 Some(search) => div().flex_none().w(px(theme::SEARCH_FIELD_WIDTH)).child(search.input.clone()).into_any_element(),
                 None => Self::tool_button("search", "検索", true)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -872,8 +835,8 @@ impl Browser {
     }
 
     fn sidebar_item(&self, id: String, label: String, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let active = self.history.current() == path;
-        let (hover_path, drop_path) = (path.clone(), path.clone());
+        let active = self.tab.history.current() == path;
+        let (hover_path, drop_path, tab_path) = (path.clone(), path.clone(), path.clone());
         div()
             .id(gpui::ElementId::Name(id.into()))
             .px_2()
@@ -890,11 +853,12 @@ impl Browser {
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 this.hover_target(SpringTarget::Go(hover_path.clone()), event.bounds, event.event.position, cx);
             }))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 cx.stop_propagation();
-                let copy = window.modifiers().control;
+                let copy = filer_shell::control_down();
                 this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
             }))
+            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| this.open_in_new_tab(tab_path.clone(), cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.navigate(path.clone(), cx)))
     }
 
@@ -943,8 +907,8 @@ impl Browser {
     }
 
     fn status(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let icon_size = (self.view.mode == ViewMode::Icons).then(|| self.icon_size_control(cx));
-        let pane = self.pane.read(cx);
+        let icon_size = (self.tab.view.mode == ViewMode::Icons).then(|| self.icon_size_control(cx));
+        let pane = self.tab.pane.read(cx);
         let state = &pane.state;
         let count = state.entries.len();
         div()
@@ -961,14 +925,14 @@ impl Browser {
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .text_color(rgb(theme::SUB_TEXT))
             .children(icon_size)
-            .children(self.message.clone().map(|message| div().flex_none().text_color(rgb(theme::ERROR_TEXT)).child(message)))
+            .children(self.tab.message.clone().map(|message| div().flex_none().text_color(rgb(theme::ERROR_TEXT)).child(message)))
             .child(div().flex_none().child(if state.loading {
-                let doing = if self.search_run.is_some() { "検索中" } else { "読み込み中" };
+                let doing = if self.tab.search_run.is_some() { "検索中" } else { "読み込み中" };
                 format!("{doing}… {count} 項目")
             } else if pane.properties_loading() {
                 format!("{count} 項目　プロパティを読み込み中… {}/{count}", pane.properties.len())
             } else {
-                match self.selection.len() {
+                match self.tab.selection.len() {
                     0 => format!("{count} 項目"),
                     selected => format!("{selected} / {count} 項目を選択"),
                 }
@@ -989,7 +953,7 @@ fn window_handle(window: &Window) -> isize {
     }
 }
 
-fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
+pub fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
     store.as_ref().and_then(|store| store.folder_view(path))
 }
 
@@ -1003,11 +967,12 @@ impl Render for Browser {
         }
         self.watch_scroll(window, cx);
         self.sync_with_listing(window, cx);
-        if let Some(path) = self.rename_request.take() {
+        self.save_session(cx);
+        if let Some(path) = self.tab.rename_request.take() {
             self.begin_rename(path, window, cx);
         }
-        let error = self.pane.read(cx).state.error.clone();
-        let body = match (error, self.view.mode) {
+        let error = self.tab.pane.read(cx).state.error.clone();
+        let body = match (error, self.tab.view.mode) {
             (Some(message), _) => div()
                 .flex_1()
                 .flex()
@@ -1022,6 +987,7 @@ impl Render for Browser {
         };
         let toolbar = self.toolbar(cx);
         let search_bar = self.search_bar(cx);
+        let tab_bar = self.tab_bar(cx);
         let sidebar = self.sidebar(cx);
         let status = self.status(cx);
         let menu = self.open_menu(cx);
@@ -1032,7 +998,7 @@ impl Render for Browser {
         }
         let drag_bar = dragging.then(|| self.drag_bar(cx));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
-        gpui::set_drop_volume(&volume_of(self.history.current()));
+        gpui::set_drop_volume(&volume_of(self.tab.history.current()));
         div()
             .relative()
             .flex()
@@ -1044,9 +1010,9 @@ impl Render for Browser {
             .font_family(theme::FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 let target = this.current_folder(cx);
-                this.drop_paths(paths.paths(), target, window.modifiers().control, cx);
+                this.drop_paths(paths.paths(), target, filer_shell::control_down(), cx);
             }))
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))
@@ -1060,6 +1026,7 @@ impl Render for Browser {
                 }),
             )
             .child(toolbar)
+            .children(tab_bar)
             .children(search_bar)
             .on_drag_move::<ExternalPaths>(cx.listener(|this, _: &DragMoveEvent<ExternalPaths>, _, cx| {
                 if !this.drag_seen {

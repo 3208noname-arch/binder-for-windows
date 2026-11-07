@@ -5,12 +5,14 @@ mod group;
 mod history;
 mod selection;
 mod sort;
+mod tabs;
 mod view;
 
 pub use entry::{Entry, SearchQuery, format_size, kind_of};
 pub use group::{Date, Group, GroupKey, Properties, date_group, name_group, size_group, value_group};
 pub use history::History;
 pub use selection::Selection;
+pub use tabs::{SavedTab, TabList, TabSession};
 pub use view::{
     AppSettings, DEFAULT_COLUMN_WIDTH, DEFAULT_ICON_SIZE, Field, FolderView, ListColumn, MAX_FIELD_WIDTH,
     MAX_ICON_SIZE, MAX_SPRING_MS, MIN_FIELD_WIDTH, MIN_ICON_SIZE, MIN_SPRING_MS, ScrollbarMode, ViewMode, fit_width, rows_in_band,

@@ -97,6 +97,11 @@ impl FolderPane {
         self.start_listing(generation, path, cx);
     }
 
+    /// 開くまで何も読まない一覧。裏のタブが、選ばれるまで持っている。
+    pub fn unopened(path: PathBuf, order: SortOrder, show_hidden: bool) -> Self {
+        Self::empty(path, order, show_hidden)
+    }
+
     fn empty(path: PathBuf, order: SortOrder, show_hidden: bool) -> Self {
         let mut state = ListState::new(path);
         state.order = order;

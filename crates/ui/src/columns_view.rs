@@ -53,19 +53,19 @@ mod tests {
 impl Browser {
     pub fn resize_column_view(&mut self, column: usize, width: f32, cx: &mut Context<Self>) {
         let width = clamp_column_width(width);
-        if let Some(current) = self.columns.get_mut(column) {
+        if let Some(current) = self.tab.columns.get_mut(column) {
             current.view.column_width = width;
-            if current.pane == self.pane {
-                self.view.column_width = width;
+            if current.pane == self.tab.pane {
+                self.tab.view.column_width = width;
             }
-            self.active_column = column;
+            self.tab.active_column = column;
             cx.notify();
         }
     }
 
     /// 列の境界のダブルクリック。いちばん長い名前に合わせる。
     fn fit_column(&mut self, column: usize, cx: &mut Context<Self>) {
-        let Some(current) = self.columns.get(column) else { return };
+        let Some(current) = self.tab.columns.get(column) else { return };
         let state = &current.pane.read(cx).state;
         let names = state.entries.iter().map(|entry| entry.name.as_str());
         let width = fit_width(names, theme::TEXT_SIZE, theme::COLUMN_FIT_PADDING);
@@ -75,12 +75,12 @@ impl Browser {
 
     /// 列の余白を押した時は、その列の選択を解いて右の列を閉じる。
     pub fn clear_column(&mut self, column: usize, cx: &mut Context<Self>) {
-        if let Some(current) = self.columns.get_mut(column) {
+        if let Some(current) = self.tab.columns.get_mut(column) {
             current.selected = None;
-            self.selection.clear();
-            self.columns.truncate(column + 1);
-            self.active_column = column;
-            self.preview = None;
+            self.tab.selection.clear();
+            self.tab.columns.truncate(column + 1);
+            self.tab.active_column = column;
+            self.tab.preview = None;
             cx.notify();
         }
     }
@@ -89,25 +89,25 @@ impl Browser {
     /// 親の列が画面に無い時は偽を返す。
     pub fn pin_folder(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
         let Some(parent) = path.parent() else { return false };
-        let Some(column) = self.columns.iter().position(|column| column.pane.read(cx).state.path == parent) else { return false };
-        let opened = self.columns.get(column + 1).is_some_and(|next| next.pane.read(cx).state.path == path);
+        let Some(column) = self.tab.columns.iter().position(|column| column.pane.read(cx).state.path == parent) else { return false };
+        let opened = self.tab.columns.get(column + 1).is_some_and(|next| next.pane.read(cx).state.path == path);
         if !opened {
             self.open_column_for(path, cx);
         }
-        if self.columns.len() <= column + 1 {
+        if self.tab.columns.len() <= column + 1 {
             return false;
         }
-        self.column_anchor = Some(column + 1);
-        self.active_column = column + 1;
-        self.columns_reveal = true;
+        self.tab.column_anchor = Some(column + 1);
+        self.tab.active_column = column + 1;
+        self.tab.columns_reveal = true;
         cx.notify();
         true
     }
 
     /// 履歴の現在地より深い列を、左端に寄せているか。
     pub fn column_pinned(&self) -> bool {
-        let root = self.columns.iter().position(|column| column.pane == self.pane);
-        self.view.mode == ViewMode::Columns && self.column_anchor.is_some_and(|anchor| Some(anchor) > root)
+        let root = self.tab.columns.iter().position(|column| column.pane == self.tab.pane);
+        self.tab.view.mode == ViewMode::Columns && self.tab.column_anchor.is_some_and(|anchor| Some(anchor) > root)
     }
 
     /// 左端に寄せた列を閉じて、1つ親の列へ戻る。寄せていなければ偽を返す。
@@ -115,33 +115,33 @@ impl Browser {
         if !self.column_pinned() {
             return false;
         }
-        let Some(anchor) = self.column_anchor else { return false };
+        let Some(anchor) = self.tab.column_anchor else { return false };
         let previous = anchor.saturating_sub(1);
-        self.columns.truncate(anchor.max(1));
-        self.columns[previous].selected = None;
-        self.selection.clear();
-        self.preview = None;
-        self.active_column = previous;
-        self.column_anchor = (previous > 0).then_some(previous);
-        self.columns_reveal = true;
+        self.tab.columns.truncate(anchor.max(1));
+        self.tab.columns[previous].selected = None;
+        self.tab.selection.clear();
+        self.tab.preview = None;
+        self.tab.active_column = previous;
+        self.tab.column_anchor = (previous > 0).then_some(previous);
+        self.tab.columns_reveal = true;
         cx.notify();
         true
     }
 
     /// 列の並びを描く前に、左端に寄せる余白と横の位置を決める。
     fn align_columns(&mut self, cx: &mut Context<Self>) -> f32 {
-        self.column_anchor = self.column_anchor.filter(|&anchor| anchor < self.columns.len());
-        let widths = self.columns.iter().map(|column| column.view.column_width);
-        let preview = if self.preview.is_some() { theme::PREVIEW_WIDTH } else { 0. };
+        self.tab.column_anchor = self.tab.column_anchor.filter(|&anchor| anchor < self.tab.columns.len());
+        let widths = self.tab.columns.iter().map(|column| column.view.column_width);
+        let preview = if self.tab.preview.is_some() { theme::PREVIEW_WIDTH } else { 0. };
         let total = widths.clone().sum::<f32>() + preview;
-        let left: f32 = widths.take(self.column_anchor.unwrap_or(0)).sum();
-        let viewport: f32 = self.columns_scroll.bounds().size.width.into();
+        let left: f32 = widths.take(self.tab.column_anchor.unwrap_or(0)).sum();
+        let viewport: f32 = self.tab.columns_scroll.bounds().size.width.into();
         let (spacer, offset) = column_layout(left, total, viewport);
-        if self.columns_reveal {
+        if self.tab.columns_reveal {
             // 最初の描画では幅が分からないので、次の描画に回す
             if viewport > 0. {
-                self.columns_reveal = false;
-                self.columns_scroll.set_offset(Point::new(px(-offset), px(0.)));
+                self.tab.columns_reveal = false;
+                self.tab.columns_scroll.set_offset(Point::new(px(-offset), px(0.)));
             }
             cx.notify();
         }
@@ -154,12 +154,12 @@ impl Browser {
         if std::mem::take(&mut self.suppress_click) {
             return;
         }
-        self.active_column = column;
+        self.tab.active_column = column;
         let modifiers = event.modifiers();
         if modifiers.control || modifiers.shift {
-            let held = self.column_selected_path(column, cx).filter(|path| self.selection.contains(path));
+            let held = self.column_selected_path(column, cx).filter(|path| self.tab.selection.contains(path));
             self.click_item(path, entry.is_dir, event, window, cx);
-            if held.is_some_and(|path| !self.selection.contains(&path)) {
+            if held.is_some_and(|path| !self.tab.selection.contains(&path)) {
                 self.release_column_item(column, cx);
             }
         } else if event.click_count() == 2 {
@@ -172,21 +172,21 @@ impl Browser {
 
     /// 列で開いている項目のパス。
     fn column_selected_path(&self, column: usize, cx: &Context<Self>) -> Option<PathBuf> {
-        let current = self.columns.get(column)?;
+        let current = self.tab.columns.get(column)?;
         Some(current.pane.read(cx).state.path.join(current.selected.as_ref()?))
     }
 
     /// 列で開いていた項目が選択から外れた時に、右の列とプレビューも閉じる。
     /// 閉じた列にあった選択は、見えないまま操作の対象にならないよう外す。
     fn release_column_item(&mut self, column: usize, cx: &mut Context<Self>) {
-        let Some(current) = self.columns.get_mut(column) else { return };
+        let Some(current) = self.tab.columns.get_mut(column) else { return };
         current.selected = None;
-        self.columns.truncate(column + 1);
-        self.active_column = column;
-        self.preview = None;
-        self.column_anchor = self.column_anchor.filter(|&anchor| anchor <= column);
+        self.tab.columns.truncate(column + 1);
+        self.tab.active_column = column;
+        self.tab.preview = None;
+        self.tab.column_anchor = self.tab.column_anchor.filter(|&anchor| anchor <= column);
         let ordered = self.ordered_paths(cx);
-        self.selection.retain_existing(&ordered);
+        self.tab.selection.retain_existing(&ordered);
         cx.notify();
     }
 
@@ -194,56 +194,56 @@ impl Browser {
     pub fn select_pressed(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match self.column_item(&path, cx) {
             Some((column, name, entry)) => self.select_in_column(column, name, entry, cx),
-            None => self.selection.select_only(path),
+            None => self.tab.selection.select_only(path),
         }
     }
 
     /// `path` を行に持つ列と、その項目。
     fn column_item(&self, path: &Path, cx: &Context<Self>) -> Option<(usize, OsString, Entry)> {
-        if self.view.mode != ViewMode::Columns {
+        if self.tab.view.mode != ViewMode::Columns {
             return None;
         }
         let (parent, name) = (path.parent()?, path.file_name()?);
-        let column = self.columns.iter().position(|column| column.pane.read(cx).state.path == parent)?;
-        let pane = self.columns[column].pane.read(cx);
+        let column = self.tab.columns.iter().position(|column| column.pane.read(cx).state.path == parent)?;
+        let pane = self.tab.columns[column].pane.read(cx);
         let entry = pane.state.entries.iter().find(|entry| entry.os_name() == name)?.clone();
         Some((column, name.to_os_string(), entry))
     }
 
     /// カラムの親の列で、開いているフォルダの行か。
     pub fn is_open_in_column(&self, path: &Path, cx: &Context<Self>) -> bool {
-        self.view.mode == ViewMode::Columns
-            && self.columns.iter().any(|column| {
+        self.tab.view.mode == ViewMode::Columns
+            && self.tab.columns.iter().any(|column| {
                 column.selected.as_deref() == path.file_name() && path.parent() == Some(column.pane.read(cx).state.path.as_path())
             })
     }
 
     /// 列の項目を選ぶ。右の列を閉じ、フォルダなら新しい列を開く。
     pub fn select_in_column(&mut self, column: usize, name: OsString, entry: Entry, cx: &mut Context<Self>) {
-        let Some(current) = self.columns.get_mut(column) else { return };
+        let Some(current) = self.tab.columns.get_mut(column) else { return };
         current.selected = Some(name.clone());
-        self.active_column = column;
+        self.tab.active_column = column;
         let folder = current.pane.read(cx).state.path.clone();
         let path = folder.join(&name);
-        self.selection.select_only(path.clone());
-        self.columns.truncate(column + 1);
+        self.tab.selection.select_only(path.clone());
+        self.tab.columns.truncate(column + 1);
         if entry.is_dir {
-            self.preview = None;
+            self.tab.preview = None;
             let view = self.view_of(&path);
             let pane = self.new_pane(path, view.order, view.needs_properties(), cx);
-            self.columns.push(Column::new(pane, view));
-            self.active_column = column + 1;
+            self.tab.columns.push(Column::new(pane, view));
+            self.tab.active_column = column + 1;
         } else {
-            self.preview = Some((folder, entry));
+            self.tab.preview = Some((folder, entry));
         }
         // 寄せた列より左を選び直したら、寄せるのをやめる
-        self.column_anchor = self.column_anchor.filter(|&anchor| anchor <= column + 1);
-        self.columns_reveal = true;
+        self.tab.column_anchor = self.tab.column_anchor.filter(|&anchor| anchor <= column + 1);
+        self.tab.columns_reveal = true;
         cx.notify();
     }
 
     pub fn column_tree(&mut self, column: usize, cx: &Context<Self>) -> Rc<Flattened> {
-        let current = &self.columns[column];
+        let current = &self.tab.columns[column];
         let group = current.view.group;
         let pane = current.pane.read(cx);
         if let Some((key, tree)) = &current.tree
@@ -255,12 +255,12 @@ impl Browser {
         }
         let (key, tree) = Self::plain_tree(pane, group);
         let tree = Rc::new(tree);
-        self.columns[column].tree = Some((key, tree.clone()));
+        self.tab.columns[column].tree = Some((key, tree.clone()));
         tree
     }
 
     fn column_rows(&mut self, column: usize, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let Some(current) = self.columns.get(column) else { return Vec::new() };
+        let Some(current) = self.tab.columns.get(column) else { return Vec::new() };
         let selected = current.selected.clone();
         let width = current.view.column_width;
         let pane = current.pane.clone();
@@ -277,7 +277,7 @@ impl Browser {
                 };
                 let entry = pane.read(cx).state.entries.get(row.entry as usize)?.clone();
                 let path = folder.join(entry.os_name());
-                let active = selected.as_deref() == Some(entry.os_name()) || self.selection.contains(&path);
+                let active = selected.as_deref() == Some(entry.os_name()) || self.tab.selection.contains(&path);
                 let background = match (active, ix % 2 == 1) {
                     (true, _) => selected_background,
                     (false, true) => theme::STRIPE,
@@ -287,7 +287,7 @@ impl Browser {
                 let name = entry.os_name().to_os_string();
                 let is_dir = entry.is_dir;
                 let icon = self.item_icon(&entry, icon, theme::ROW_ICON);
-                let renaming = self.renaming.as_ref().is_some_and(|renaming| renaming.path == path);
+                let renaming = self.tab.renaming.as_ref().is_some_and(|renaming| renaming.path == path);
                 let label = div()
                     .flex()
                     .items_center()
@@ -327,7 +327,7 @@ impl Browser {
 
     fn column_list(&mut self, column: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tree = self.column_tree(column, cx);
-        let current = &self.columns[column];
+        let current = &self.tab.columns[column];
         let error = current.pane.read(cx).state.error.clone();
         let scroll = current.scroll.clone();
         let width = current.view.column_width;
@@ -359,7 +359,7 @@ impl Browser {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    this.active_column = column;
+                    this.tab.active_column = column;
                     if event.click_count == 2 {
                         this.fit_column(column, cx);
                     } else {
@@ -381,13 +381,13 @@ impl Browser {
                 this.begin_band(event.position, Some(column), false, cx);
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
-                this.active_column = column;
+                this.tab.active_column = column;
                 this.folder_menu(cx);
             }))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 cx.stop_propagation();
-                let copy = window.modifiers().control;
-                let target = this.columns[column].pane.read(cx).state.path.clone();
+                let copy = filer_shell::control_down();
+                let target = this.tab.columns[column].pane.read(cx).state.path.clone();
                 this.drop_paths(paths.paths(), target, copy, cx);
             }))
             .child(body)
@@ -396,7 +396,7 @@ impl Browser {
     }
 
     fn preview_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let (folder, entry) = self.preview.as_ref()?;
+        let (folder, entry) = self.tab.preview.as_ref()?;
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, LARGE));
         let line = |label: &str, value: String| {
             div()
@@ -427,7 +427,7 @@ impl Browser {
 
     pub fn render_columns(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let spacer = self.align_columns(cx);
-        let columns: Vec<_> = (0..self.columns.len()).map(|i| self.column_list(i, cx)).collect();
+        let columns: Vec<_> = (0..self.tab.columns.len()).map(|i| self.column_list(i, cx)).collect();
         let preview = self.preview_panel(cx);
         let bar = self.scrollbar("columns-bar", ScrollTarget::Columns, false, 0., cx);
         let mut strip = div()
@@ -436,7 +436,7 @@ impl Browser {
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
-            .track_scroll(&self.columns_scroll)
+            .track_scroll(&self.tab.columns_scroll)
             .children(columns)
             .children(preview)
             .child(div().flex_none().h_full().w(px(spacer)));
