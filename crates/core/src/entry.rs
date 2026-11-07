@@ -10,6 +10,8 @@ pub struct Entry {
     pub is_dir: bool,
     /// ジャンクションやシンボリックリンク
     pub is_link: bool,
+    /// 隠し属性が付いている
+    pub is_hidden: bool,
     pub size: u64,
     /// 更新日時（FILETIME、1601年からの100ナノ秒）
     pub modified: i64,
@@ -21,6 +23,11 @@ impl Entry {
     /// パスの組み立てと項目の区別に使う、元の名前。
     pub fn os_name(&self) -> &OsStr {
         self.raw_name.as_deref().unwrap_or(OsStr::new(&self.name))
+    }
+
+    /// 別の場所を指す項目か。印を付けて示す。
+    pub fn is_shortcut(&self) -> bool {
+        self.is_link || ["lnk", "url"].iter().any(|ext| self.extension().eq_ignore_ascii_case(ext))
     }
 
     /// 拡張子。無ければ空文字列。先頭のドットだけの名前は拡張子と見なさない。
@@ -60,7 +67,21 @@ pub fn kind_of(entry: &Entry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_size;
+    use super::{Entry, format_size};
+
+    fn named(name: &str, is_link: bool) -> Entry {
+        Entry { name: name.into(), raw_name: None, is_dir: false, is_link, is_hidden: false, size: 0, modified: 0, created: 0 }
+    }
+
+    #[test]
+    fn links_and_shortcut_files_count_as_shortcuts() {
+        assert!(named("a.lnk", false).is_shortcut());
+        assert!(named("A.LNK", false).is_shortcut());
+        assert!(named("site.url", false).is_shortcut());
+        assert!(named("junction", true).is_shortcut());
+        assert!(!named("a.txt", false).is_shortcut());
+        assert!(!named(".lnk", false).is_shortcut());
+    }
 
     #[test]
     fn formats_size_in_units_of_1000() {

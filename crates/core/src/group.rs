@@ -195,7 +195,7 @@ mod tests {
     }
 
     fn entry(size: u64, is_dir: bool) -> Entry {
-        Entry { name: "x".into(), raw_name: None, is_dir, is_link: false, size, modified: 0, created: 0 }
+        Entry { name: "x".into(), raw_name: None, is_dir, is_link: false, is_hidden: false, size, modified: 0, created: 0 }
     }
 
     #[test]

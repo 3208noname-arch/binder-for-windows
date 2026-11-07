@@ -65,7 +65,25 @@ pub fn open_store() -> Option<Store> {
     }
 }
 
+/// panicの内容をファイルへ残す。release はコンソールが無く、ウィンドウの処理中のpanicはそのまま落ちる。
+fn log_panics() {
+    let Some(folder) = std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("filer")) else { return };
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let _ = std::fs::create_dir_all(&folder);
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join("panic.log")) {
+            use std::io::Write;
+            let _ = writeln!(file, "{info}
+{backtrace}
+");
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    log_panics();
     let start = Instant::now();
     let measure = std::env::args_os().any(|arg| arg == "--measure").then_some(start);
     let path = start_path();

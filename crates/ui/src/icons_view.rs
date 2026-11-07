@@ -4,10 +4,10 @@ use crate::scrollbar::ScrollTarget;
 use crate::list_tree::{Flattened, Row};
 use crate::theme;
 use crate::text_input::TextInput;
-use filer_core::{Date, Entry, GroupKey, LongName, MAX_ICON_SIZE, MIN_ICON_SIZE, text_width};
+use filer_core::{Date, Entry, GroupKey, MAX_ICON_SIZE, MIN_ICON_SIZE};
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, Window, deferred,
-    div, linear_color_stop, linear_gradient, list, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, TextRun, Window, black,
+    deferred, div, font, linear_color_stop, linear_gradient, list, prelude::*, px, rgb,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -97,60 +97,79 @@ mod tests {
     }
 }
 
+/// 名前を折り返した時の行数。
+fn label_lines(name: &str, width: f32, window: &Window) -> f32 {
+    let run = TextRun { len: name.len(), font: font(theme::FONT), color: black(), background_color: None, underline: None, strikethrough: None };
+    let lines = window.text_system().shape_text(name.to_string().into(), px(theme::SMALL_TEXT_SIZE), &[run], Some(px(width)), None);
+    lines.map_or(1, |lines| lines.iter().map(|line| line.wrap_boundaries.len() + 1).sum::<usize>()) as f32
+}
+
+/// 色やカーソルなど、名前の見せ方の材料。
+struct LabelLook {
+    selected: bool,
+    highlight: bool,
+    fill: u32,
+    text: u32,
+}
+
 impl Browser {
-    /// 名前の編集欄。セルより広く取り、隣のセルの上に重ねて出す。
-    fn grid_rename(&self, entry: &Entry, cell_width: f32, input: Entity<TextInput>) -> AnyElement {
-        let wanted = text_width(&entry.name, theme::SMALL_TEXT_SIZE) + theme::RENAME_PADDING;
-        let width = wanted.clamp(cell_width, theme::RENAME_MAX_WIDTH);
+    /// 名前の編集欄。折り返しは表示と同じ幅にして、隣のセルの下の行まで重ねて出す。
+    fn grid_rename(&self, lines: f32, input: Entity<TextInput>) -> AnyElement {
+        let width = theme::grid_label_width(self.view.icon_size) + theme::RENAME_SIDE * 2.;
         div()
             .relative()
             .w_full()
-            .h(px(theme::GRID_LABEL_LINE + 4.))
-            .child(deferred(
-                div().absolute().top_0().left(px((cell_width - width) / 2.)).w(px(width)).child(input),
-            ))
+            .h(px(theme::GRID_LABEL_LINE * lines.min(theme::GRID_LABEL_LINES)))
+            .child(deferred(div().absolute().top_0().left(px(theme::GRID_LABEL_SIDE - theme::RENAME_SIDE)).w(px(width)).child(input)))
             .into_any_element()
     }
 
-    /// アイコンの下の名前。長い名前は折り返し、それでも収まらない分は設定に従う。
-    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, width: f32, selected: bool, background: u32, text: u32) -> AnyElement {
+    /// アイコンの下の名前。3行に収まらない分は薄く消し、設定によってマウスを乗せると流す。
+    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window) -> AnyElement {
+        let width = theme::grid_label_width(self.view.icon_size);
+        let lines = label_lines(&entry.name, width, window);
         if let Some(renaming) = self.renaming.as_ref().filter(|renaming| renaming.path == path) {
-            return self.grid_rename(entry, width, renaming.input.clone());
+            return self.grid_rename(lines, renaming.input.clone());
         }
-        let name = entry.name.clone();
         let line = theme::GRID_LABEL_LINE;
-        let lines = (text_width(&name, theme::SMALL_TEXT_SIZE) / width).ceil();
         let overflowing = lines > theme::GRID_LABEL_LINES;
-        let base = div()
+        let hovered = self.hovered_cell.as_deref() == Some(path);
+        let label = div()
             .relative()
-            .w_full()
+            .flex_none()
+            .max_w_full()
+            .px(px(theme::GRID_LABEL_SIDE))
+            .rounded_sm()
             .overflow_hidden()
+            .when(look.highlight, |label| label.bg(rgb(look.fill)))
+            .when(look.selected, |label| label.text_color(rgb(look.text)))
+            .when(overflowing, |label| label.h(px(line * theme::GRID_LABEL_LINES)));
+        let text = div().text_center().child(entry.name.clone());
+        let label = if overflowing && hovered && self.settings.scroll_long_names {
+            // 全文が見えた位置で止める。名前は行で読むものなので、横には動かさない
+            let distance = (lines - theme::GRID_LABEL_LINES) * line;
+            let travel = distance / theme::MARQUEE_SPEED;
+            let total = travel + theme::MARQUEE_PAUSE;
+            let wait = theme::MARQUEE_PAUSE / total;
+            let animation = Animation::new(Duration::from_secs_f32(total)).with_easing(move |t| ((t - wait) / (1. - wait)).clamp(0., 1.));
+            label.child(text.with_animation(("marquee", ix), animation, move |block, progress| block.mt(px(-distance * progress))))
+        } else {
+            let color = gpui::Rgba::from(rgb(look.fill));
+            let fade = linear_gradient(180., linear_color_stop(gpui::Rgba { a: 0., ..color }, 0.), linear_color_stop(color, 1.));
+            label.child(text).when(overflowing, |label| label.child(div().absolute().left_0().right_0().bottom_0().h(px(line)).bg(fade)))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .w_full()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .line_height(px(line))
-            .when(overflowing, |label| label.h(px(line * theme::GRID_LABEL_LINES)))
-            .when(selected, |label| label.text_color(rgb(text)));
-        let hovered = self.hovered_cell.as_deref() == Some(path);
-        if overflowing && hovered && self.settings.long_name == LongName::Scroll {
-            // 折り返したまま縦に流す。名前は行で読むものなので、横には動かさない
-            let distance = (lines - theme::GRID_LABEL_LINES + 1.) * line;
-            let seconds = (distance / theme::MARQUEE_SPEED).max(1.0) + 1.0;
-            let moving = div().w_full().text_center().child(name).with_animation(
-                ("marquee", ix),
-                Animation::new(Duration::from_secs_f32(seconds)).repeat(),
-                move |block, progress| block.mt(px(-distance * progress)),
-            );
-            return base.child(moving).into_any_element();
-        }
-        let color = gpui::Rgba::from(rgb(background));
-        let fade = linear_gradient(180., linear_color_stop(gpui::Rgba { a: 0., ..color }, 0.), linear_color_stop(color, 1.));
-        base.child(div().w_full().text_center().child(name))
-            .when(overflowing, |label| {
-                label.child(div().absolute().left_0().right_0().bottom_0().h(px(line)).bg(fade))
-            })
+            .child(label)
             .into_any_element()
     }
 
-    fn grid_cell(&self, ix: usize, folder: &Path, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn grid_cell(&self, ix: usize, folder: &Path, entry: &Entry, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let path = folder.join(entry.os_name());
         let selected = self.selection.contains(&path);
         let whole_cell = self.settings.grid_selection_matches_hover;
@@ -162,17 +181,19 @@ impl Browser {
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, bucket));
         let filled = selected && whole_cell;
         let hovered = self.hovered_cell.as_deref() == Some(path.as_path());
-        let background = match (filled, selected, hovered) {
-            (true, _, _) => selected_background,
-            (false, true, _) | (false, false, true) => theme::HOVER,
+        // 全体のハイライトを切った時は、名前だけを選択の色にする
+        let highlight = selected && !whole_cell;
+        let fill = match (selected, hovered) {
+            (true, _) => selected_background,
+            (false, true) => theme::HOVER,
             _ => theme::BACKGROUND,
         };
-        let label_width = cell_width - theme::GRID_LABEL_PADDING;
-        let label = self.grid_label(ix, &path, entry, label_width, selected, background, selected_text);
+        let look = LabelLook { selected, highlight, fill, text: selected_text };
+        let label = self.grid_label(ix, &path, entry, look, window);
         let label_path = path.clone();
         let cell = div()
             .id(("cell", ix))
-            .when(self.is_cut(&path), |cell| cell.opacity(theme::CUT_OPACITY))
+            .when(self.is_dimmed(&path, entry), |cell| cell.opacity(theme::CUT_OPACITY))
             .flex()
             .flex_col()
             .flex_none()
@@ -181,9 +202,9 @@ impl Browser {
             .p_1()
             .w(px(cell_width))
             .rounded_md()
+            .cursor(CursorStyle::Arrow)
             .when(!selected, |c| c.hover(|s| s.bg(rgb(theme::HOVER))))
             .when(filled, |c| c.bg(rgb(selected_background)))
-            .when(selected && !whole_cell, |c| c.bg(rgb(theme::HOVER)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let current = this.hovered_cell.as_deref() == Some(label_path.as_path());
                 if *hovered {
@@ -194,14 +215,14 @@ impl Browser {
                     cx.notify();
                 }
             }))
-            .child(self.icon(icon, is_dir, size))
+            .child(div().flex_none().rounded_md().when(highlight, |box_| box_.bg(rgb(theme::HOVER))).child(self.item_icon(entry, icon, size)))
             .child(label);
         let click_path = path.clone();
         self.item_mouse(cell, path, is_dir, None, cx)
             .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
-    fn grid_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn grid_row(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(data) = self.grid_data.as_ref().map(|data| data.rows.clone()) else {
             return div().into_any_element();
         };
@@ -213,7 +234,7 @@ impl Browser {
                     let state = &self.pane.read(cx).state;
                     cells.iter().filter_map(|&i| Some((i as usize, state.entries.get(i as usize)?.clone()))).collect()
                 };
-                let cells: Vec<_> = entries.iter().map(|(ix, entry)| self.grid_cell(*ix, &folder, entry, cx)).collect();
+                let cells: Vec<_> = entries.iter().map(|(ix, entry)| self.grid_cell(*ix, &folder, entry, window, cx)).collect();
                 let (_, row_height) = grid_metrics(self.view.icon_size);
                 div()
                     .id(index)
@@ -267,6 +288,7 @@ impl Browser {
             .relative()
             .flex_1()
             .min_h_0()
+            .cursor(CursorStyle::Crosshair)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if event.modifiers.control {
                     let notches = f32::from(event.delta.pixel_delta(px(theme::ROW_HEIGHT)).y).signum();
@@ -285,7 +307,7 @@ impl Browser {
             .child(
                 list(
                     self.grid_list.clone(),
-                    cx.processor(|this, index: usize, _: &mut Window, cx| this.grid_row(index, cx)),
+                    cx.processor(|this, index: usize, window: &mut Window, cx| this.grid_row(index, window, cx)),
                 )
                 .size_full(),
             )

@@ -3,12 +3,14 @@
 use crate::browser::Browser;
 use crate::theme;
 use filer_core::{MAX_ICON_SIZE, MIN_ICON_SIZE};
+use filer_core::ScrollbarMode;
 use gpui::{
     AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, div, point,
     prelude::*, px, rgba,
 };
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScrollTarget {
     List,
     ListColumns,
@@ -16,6 +18,61 @@ pub enum ScrollTarget {
     Column(usize),
     Columns,
     Sidebar,
+}
+
+impl ScrollTarget {
+    /// 列の数によらず、1つずつある対象。
+    pub const FIXED: [ScrollTarget; 5] =
+        [ScrollTarget::List, ScrollTarget::ListColumns, ScrollTarget::Grid, ScrollTarget::Columns, ScrollTarget::Sidebar];
+
+    fn vertical(self) -> bool {
+        !matches!(self, ScrollTarget::ListColumns | ScrollTarget::Columns)
+    }
+}
+
+/// 1本のスクロールバーの出入り。スクロールされた時に現れ、止まって少しすると消える。
+#[derive(Clone, Copy, Default)]
+pub struct BarFade {
+    offset: Option<f32>,
+    appeared: Option<Instant>,
+    moved: Option<Instant>,
+}
+
+impl BarFade {
+    const FADE_IN: Duration = Duration::from_millis(theme::SCROLLBAR_FADE_IN_MS);
+    const FADE_OUT: Duration = Duration::from_millis(theme::SCROLLBAR_FADE_OUT_MS);
+    const LINGER: Duration = Duration::from_millis(theme::SCROLLBAR_LINGER_MS);
+
+    /// 今の位置を伝える。最初の1回は基準にするだけで、バーは出さない。
+    pub fn observe(&mut self, offset: f32, now: Instant) {
+        if self.offset.is_some_and(|last| last != offset) {
+            if self.opacity(now) <= 0. {
+                self.appeared = Some(now);
+            }
+            self.moved = Some(now);
+        }
+        self.offset = Some(offset);
+    }
+
+    pub fn opacity(&self, now: Instant) -> f32 {
+        let (Some(appeared), Some(moved)) = (self.appeared, self.moved) else { return 0. };
+        let fade_in = now.saturating_duration_since(appeared).as_secs_f32() / Self::FADE_IN.as_secs_f32();
+        let idle = now.saturating_duration_since(moved).saturating_sub(Self::LINGER);
+        let fade_out = 1. - idle.as_secs_f32() / Self::FADE_OUT.as_secs_f32();
+        fade_in.min(fade_out).clamp(0., 1.)
+    }
+
+    /// 濃さが変わっている最中か。
+    pub fn fading(&self, now: Instant) -> bool {
+        let (Some(appeared), Some(moved)) = (self.appeared, self.moved) else { return false };
+        let fade_out = moved + Self::LINGER;
+        now < appeared + Self::FADE_IN || (fade_out <= now && now < fade_out + Self::FADE_OUT)
+    }
+
+    /// 出ているバーが薄くなり始める時刻。
+    pub fn fade_start(&self, now: Instant) -> Option<Instant> {
+        self.moved.map(|moved| moved + Self::LINGER).filter(|start| *start > now)
+    }
 }
 
 /// スクロールの位置。`offset` は上端からの距離で、0以上。
@@ -66,6 +123,22 @@ fn along(point: Point<gpui::Pixels>, vertical: bool) -> f32 {
 }
 
 impl Browser {
+    /// スクロールの位置。スクロールされたかの判断に使う。
+    pub fn bar_offset(&self, target: ScrollTarget) -> f32 {
+        self.scroll_metrics(target, target.vertical()).map_or(0., |metrics| metrics.offset)
+    }
+
+    fn bar_opacity(&self, target: ScrollTarget) -> f32 {
+        if self.settings.scrollbar == ScrollbarMode::Always || self.scroll_drag.is_some_and(|drag| drag.target == target) {
+            return 1.;
+        }
+        let bar = match target {
+            ScrollTarget::Column(index) => self.columns.get(index).map(|column| &column.bar),
+            _ => self.bars.get(&target),
+        };
+        bar.map_or(0., |bar| bar.opacity(Instant::now()))
+    }
+
     fn scroll_handle(&self, target: ScrollTarget) -> Option<ScrollHandle> {
         match target {
             ScrollTarget::List => Some(self.list_scroll.0.borrow().base_handle.clone()),
@@ -97,7 +170,8 @@ impl Browser {
 
     /// つまみを描く。親の要素は `relative` で、`inset` はつまみの動く範囲の始まり。
     pub fn scrollbar(&self, id: &'static str, target: ScrollTarget, vertical: bool, inset: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.bars_visible() {
+        let opacity = self.bar_opacity(target);
+        if opacity <= 0. {
             return None;
         }
         let metrics = self.scroll_metrics(target, vertical)?;
@@ -107,6 +181,7 @@ impl Browser {
             .id(id)
             .absolute()
             .rounded_full()
+            .opacity(opacity)
             .bg(rgba(theme::SCROLL_THUMB))
             .hover(|s| s.bg(rgba(theme::SCROLL_THUMB_HOVER)))
             .cursor(CursorStyle::Arrow)
@@ -200,7 +275,46 @@ impl Browser {
 
 #[cfg(test)]
 mod tests {
-    use super::ScrollMetrics;
+    use super::{BarFade, ScrollMetrics};
+    use std::time::{Duration, Instant};
+
+    fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    #[test]
+    fn first_position_does_not_show_the_bar() {
+        let (mut bar, now) = (BarFade::default(), Instant::now());
+        bar.observe(120., now);
+        bar.observe(120., now + ms(50));
+        assert_eq!(bar.opacity(now + ms(50)), 0.);
+    }
+
+    #[test]
+    fn bar_fades_in_stays_and_fades_out() {
+        let (mut bar, now) = (BarFade::default(), Instant::now());
+        bar.observe(0., now);
+        bar.observe(10., now);
+        assert_eq!(bar.opacity(now), 0.);
+        assert!(bar.fading(now), "濃さが0の瞬間も、描き続けないと現れない");
+        assert!(bar.fading(now + ms(BarFade::FADE_IN.as_millis() as u64 / 2)));
+        assert!(!bar.fading(now + BarFade::FADE_IN));
+        assert_eq!(bar.opacity(now + BarFade::FADE_IN), 1.);
+        assert_eq!(bar.opacity(now + BarFade::LINGER), 1.);
+        assert!(bar.fading(now + BarFade::LINGER + BarFade::FADE_OUT / 2));
+        assert_eq!(bar.opacity(now + BarFade::LINGER + BarFade::FADE_OUT), 0.);
+        assert!(!bar.fading(now + BarFade::LINGER + BarFade::FADE_OUT));
+    }
+
+    #[test]
+    fn scrolling_again_keeps_the_bar() {
+        let (mut bar, now) = (BarFade::default(), Instant::now());
+        bar.observe(0., now);
+        bar.observe(10., now);
+        let later = now + BarFade::LINGER;
+        bar.observe(20., later);
+        assert_eq!(bar.opacity(later + BarFade::LINGER), 1.);
+    }
 
     #[test]
     fn no_thumb_when_everything_fits() {

@@ -1,5 +1,5 @@
-use crate::actions::{Band, DragPopup, Renaming, RowPress, Spring, SpringTarget};
-use crate::scrollbar::{IconSizeDrag, ScrollDrag, ScrollTarget};
+use crate::actions::{Band, Renaming, RowPress, Spring, SpringTarget};
+use crate::scrollbar::{BarFade, IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::settings_view::{SettingsModel, SettingsView};
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
@@ -8,7 +8,7 @@ use crate::list_tree::Flattened;
 use crate::size_cache::SizeCache;
 use crate::theme;
 use filer_core::{
-    AppSettings, Date, Entry, Field, FolderView, GroupKey, History, ScrollbarMode, Selection, SortKey, SortOrder, ViewMode,
+    AppSettings, Date, Entry, Field, FolderView, GroupKey, History, Selection, SortKey, SortOrder, ViewMode,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
@@ -23,7 +23,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub struct Column {
     pub pane: Entity<FolderPane>,
@@ -31,6 +31,7 @@ pub struct Column {
     pub selected: Option<OsString>,
     pub view: FolderView,
     pub tree: Option<(TreeKey, Rc<Flattened>)>,
+    pub bar: BarFade,
 }
 
 /// 幅をドラッグで変えている最中の状態。
@@ -88,6 +89,10 @@ pub struct Browser {
     pub columns: Vec<Column>,
     pub columns_scroll: ScrollHandle,
     pub active_column: usize,
+    /// ダブルクリックで開き、左端に寄せている列
+    pub column_anchor: Option<usize>,
+    /// 次の描画で、右端の列が見えるよう横へ送る
+    pub columns_reveal: bool,
     pub resizing: Option<Resize>,
     pub header_drag: Option<HeaderDrag>,
     pub settings: AppSettings,
@@ -95,17 +100,17 @@ pub struct Browser {
     settings_window: Option<WindowHandle<SettingsView>>,
     pub soft_selection: bool,
     pub suppress_click: bool,
+    /// 今の押下が `grab_zone` の上だった
+    pub grab_press: bool,
     pub band_task: Option<Task<()>>,
     pub scale: f32,
     pub viewport: Size<Pixels>,
-    scroll_signature: f32,
-    pub bars_until: Option<Instant>,
-    bars_task: Option<Task<()>>,
+    pub bars: HashMap<ScrollTarget, BarFade>,
+    bars_wake: Option<(Instant, Task<()>)>,
     drag_seen: bool,
     pub cut: HashSet<PathBuf>,
     pub spring: Option<Spring>,
     pub springs_done: u32,
-    pub drag_popups: Vec<DragPopup>,
     pub band: Option<Band>,
     pub scroll_drag: Option<ScrollDrag>,
     pub icon_size_drag: Option<IconSizeDrag>,
@@ -139,7 +144,13 @@ impl Browser {
         let settings = store.as_ref().map(Store::app_settings).unwrap_or_default();
         let settings_model = cx.new(|_| SettingsModel { value: settings.clone() });
         cx.observe(&settings_model, |this, model, cx| {
-            this.settings = model.read(cx).value.clone();
+            let settings = model.read(cx).value.clone();
+            let show_hidden = settings.show_hidden;
+            let changed = show_hidden != this.settings.show_hidden;
+            this.settings = settings;
+            if changed {
+                this.apply_show_hidden(show_hidden, cx);
+            }
             cx.notify();
         })
         .detach();
@@ -147,9 +158,9 @@ impl Browser {
         if let Some(mode) = mode {
             view.mode = mode;
         }
-        let (order, wants) = (view.order, view.needs_properties());
+        let (order, wants, show_hidden) = (view.order, view.needs_properties(), settings.show_hidden);
         let pane = cx.new(|cx| {
-            let mut pane = FolderPane::new(path.clone(), order, cx);
+            let mut pane = FolderPane::new(path.clone(), order, show_hidden, cx);
             pane.set_wants_properties(wants, cx);
             if let Some(start) = measure {
                 pane.measure_from(start);
@@ -183,6 +194,8 @@ impl Browser {
             columns: Vec::new(),
             columns_scroll: ScrollHandle::new(),
             active_column: 0,
+            column_anchor: None,
+            columns_reveal: false,
             resizing: None,
             header_drag: None,
             settings,
@@ -190,17 +203,16 @@ impl Browser {
             settings_window: None,
             soft_selection: false,
             suppress_click: false,
+            grab_press: false,
             band_task: None,
             scale: window.scale_factor(),
             viewport: window.viewport_size(),
-            scroll_signature: 0.,
-            bars_until: None,
-            bars_task: None,
+            bars: HashMap::new(),
+            bars_wake: None,
             drag_seen: false,
             cut: HashSet::new(),
             spring: None,
             springs_done: 0,
-            drag_popups: Vec::new(),
             band: None,
             scroll_drag: None,
             icon_size_drag: None,
@@ -263,36 +275,59 @@ impl Browser {
         self.settings_window = cx.open_window(options, move |_, cx| cx.new(|cx| SettingsView::new(model, cx))).ok();
     }
 
-    /// スクロールされたかを見て、スクロールバーを出す時間を延ばす。
-    fn watch_scroll(&mut self, cx: &mut Context<Self>) {
-        let columns: f32 = self.columns.iter().map(|column| f32::from(column.scroll.0.borrow().base_handle.offset().y)).sum();
-        let signature = f32::from(self.list_scroll.0.borrow().base_handle.offset().y)
-            + f32::from(self.list_columns_scroll.offset().x) * 3.
-            + f32::from(self.grid_list.scroll_px_offset_for_scrollbar().y) * 5.
-            + f32::from(self.columns_scroll.offset().x) * 7.
-            + f32::from(self.sidebar_scroll.offset().y) * 11.
-            + columns * 13.;
-        if signature != self.scroll_signature {
-            self.scroll_signature = signature;
-            let linger = Duration::from_millis(theme::SCROLLBAR_LINGER_MS);
-            self.bars_until = Some(Instant::now() + linger);
-            self.bars_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(linger).await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            }));
+    /// 隠し項目の表示を切り替える。設定の窓と同じ値を保存する。
+    pub fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
+        self.settings_model.update(cx, |model, cx| {
+            model.value.show_hidden = !model.value.show_hidden;
+            cx.notify();
+        });
+        if let Some(store) = &self.store
+            && let Err(error) = store.save_app_settings(&self.settings_model.read(cx).value)
+        {
+            eprintln!("設定を保存できませんでした: {error}");
         }
     }
 
-    /// 今スクロールバーを出すか。
-    pub fn bars_visible(&self) -> bool {
-        self.settings.scrollbar == ScrollbarMode::Always
-            || self.scroll_drag.is_some()
-            || self.bars_until.is_some_and(|until| Instant::now() < until)
+    fn apply_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
+        let panes = std::iter::once(self.pane.clone())
+            .chain(self.columns.iter().map(|column| column.pane.clone()))
+            .chain(self.expanded.values().cloned());
+        for pane in panes.collect::<Vec<_>>() {
+            pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
+        }
+    }
+
+    /// スクロールされたものを調べ、スクロールバーのフェードが続く間は描き直す。
+    fn watch_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        for target in ScrollTarget::FIXED {
+            let offset = self.bar_offset(target);
+            self.bars.entry(target).or_default().observe(offset, now);
+        }
+        for index in 0..self.columns.len() {
+            let offset = self.bar_offset(ScrollTarget::Column(index));
+            self.columns[index].bar.observe(offset, now);
+        }
+        let fades = || self.bars.values().chain(self.columns.iter().map(|column| &column.bar));
+        if fades().any(|bar| bar.fading(now)) {
+            window.request_animation_frame();
+            return;
+        }
+        let Some(wake) = fades().filter_map(|bar| bar.fade_start(now)).min() else { return };
+        if self.bars_wake.as_ref().is_some_and(|(at, _)| *at == wake) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wake.saturating_duration_since(Instant::now())).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        });
+        self.bars_wake = Some((wake, task));
     }
 
     pub fn new_pane(&self, path: PathBuf, order: SortOrder, wants: bool, cx: &mut Context<Self>) -> Entity<FolderPane> {
+        let show_hidden = self.settings.show_hidden;
         let pane = cx.new(|cx| {
-            let mut pane = FolderPane::new(path, order, cx);
+            let mut pane = FolderPane::new(path, order, show_hidden, cx);
             pane.set_wants_properties(wants, cx);
             pane
         });
@@ -312,8 +347,10 @@ impl Browser {
             selected: None,
             view: self.view.clone(),
             tree: None,
+            bar: BarFade::default(),
         }];
         self.active_column = 0;
+        self.column_anchor = None;
         self.preview = None;
     }
 
@@ -328,7 +365,6 @@ impl Browser {
         self.message = None;
         self.menu = None;
         self.renaming = None;
-        self.drag_popups.clear();
         self.expanded.clear();
         self.sizes.update(cx, |sizes, _| sizes.cancel_running());
         self.list_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
@@ -346,6 +382,9 @@ impl Browser {
     }
 
     pub fn back(&mut self, cx: &mut Context<Self>) {
+        if self.leave_pinned_column(cx) {
+            return;
+        }
         if let Some(path) = self.history.go_back().map(PathBuf::from) {
             self.show(path, cx);
         }
@@ -358,6 +397,9 @@ impl Browser {
     }
 
     pub fn parent(&mut self, cx: &mut Context<Self>) {
+        if self.leave_pinned_column(cx) {
+            return;
+        }
         if let Some(parent) = self.history.current().parent().map(PathBuf::from) {
             self.navigate(parent, cx);
         }
@@ -488,6 +530,44 @@ impl Browser {
         }
     }
 
+    /// 項目のアイコン。ショートカットには矢印の印を重ねる。
+    pub fn item_icon(&self, entry: &Entry, icon: Option<Arc<Image>>, size: f32) -> AnyElement {
+        let base = self.icon(icon, entry.is_dir, size);
+        if !entry.is_shortcut() {
+            return base;
+        }
+        let badge = (size * theme::SHORTCUT_BADGE_RATIO).clamp(theme::SHORTCUT_BADGE_MIN, theme::SHORTCUT_BADGE_MAX);
+        div()
+            .relative()
+            .flex_none()
+            .size(px(size))
+            .child(base)
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(badge))
+                    .rounded_sm()
+                    .bg(rgb(theme::BACKGROUND))
+                    .border_1()
+                    .border_color(rgb(theme::LINE))
+                    .text_size(px(badge * 0.8))
+                    .line_height(px(badge))
+                    .text_color(rgb(theme::SHORTCUT_ARROW))
+                    .child("↗"),
+            )
+            .into_any_element()
+    }
+
+    /// 薄く出す項目か。切り取りの途中と、隠し項目。
+    pub fn is_dimmed(&self, path: &Path, entry: &Entry) -> bool {
+        self.is_cut(path) || entry.is_hidden
+    }
+
     /// 行のアイコン。届く前は仮の図形を出す。
     pub fn icon(&self, icon: Option<Arc<Image>>, is_dir: bool, size: f32) -> AnyElement {
         match icon {
@@ -507,6 +587,29 @@ impl Browser {
             .text_color(rgb(if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
             .when(enabled, |b| b.cursor(CursorStyle::PointingHand).hover(|s| s.bg(rgb(theme::HOVER))))
             .child(label)
+    }
+
+    /// 戻る、進む、上へのボタン。よく使うので、狙いやすい大きさにする。
+    fn nav_button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(theme::NAV_BUTTON_WIDTH))
+            .h(px(theme::NAV_BUTTON_HEIGHT))
+            .rounded_md()
+            .text_size(px(theme::NAV_GLYPH_SIZE))
+            .line_height(px(theme::NAV_BUTTON_HEIGHT))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
+            .when(enabled, |b| b.cursor(CursorStyle::PointingHand).hover(|s| s.bg(rgb(theme::BACKGROUND))))
+            .child(label)
+    }
+
+    fn nav_group() -> gpui::Div {
+        div().flex().flex_none().items_center().gap_0p5().p_0p5().rounded_lg().bg(rgb(theme::SEGMENT))
     }
 
     fn segment(&self, id: &'static str, label: &'static str, mode: ViewMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -643,7 +746,8 @@ impl Browser {
             || current.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let (back, forward, up) = (self.history.can_go_back(), self.history.can_go_forward(), current.parent().is_some());
+        let pinned = self.view.mode == ViewMode::Columns && self.column_anchor.is_some();
+        let (back, forward, up) = (self.history.can_go_back() || pinned, self.history.can_go_forward(), current.parent().is_some() || pinned);
         let parent_folder = current.parent().map(PathBuf::from);
         let active = self.active_view();
         let sort = format!("並べ替え: {} ▾", active.order.key.label());
@@ -652,21 +756,24 @@ impl Browser {
             .flex()
             .flex_none()
             .items_center()
-            .gap_1()
+            .gap_2()
             .h(px(theme::TOOLBAR_HEIGHT))
             .px_3()
             .bg(rgb(theme::BAR))
             .border_b_1()
             .border_color(rgb(theme::LINE))
-            .child(Self::tool_button("back", "‹", back).when(back, |b| {
-                b.on_click(cx.listener(|this, _, _, cx| this.back(cx))).on_drag_move::<ExternalPaths>(cx.listener(
-                    |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                        this.hover_target(SpringTarget::Back, event.bounds, event.event.position, cx);
-                    },
-                ))
-            }))
-            .child(Self::tool_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx)))))
-            .child(Self::tool_button("parent", "↑", up).when(up, |b| {
+            .child(
+                Self::nav_group()
+                    .child(Self::nav_button("back", "‹", back).when(back, |b| {
+                        b.on_click(cx.listener(|this, _, _, cx| this.back(cx))).on_drag_move::<ExternalPaths>(cx.listener(
+                            |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                                this.hover_target(SpringTarget::Back, event.bounds, event.event.position, cx);
+                            },
+                        ))
+                    }))
+                    .child(Self::nav_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx))))),
+            )
+            .child(Self::nav_group().child(Self::nav_button("parent", "↑", up).when(up, |b| {
                 let target = parent_folder.clone();
                 b.on_click(cx.listener(|this, _, _, cx| this.parent(cx)))
                     .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
@@ -679,7 +786,7 @@ impl Browser {
                             this.drop_paths(paths.paths(), target, copy, cx);
                         }
                     }))
-            }))
+            })))
             .child(div().flex_1().min_w_0().px_2().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(self.menu_button("sort", sort, Menu::Sort, cx))
             .child(self.menu_button("group", group, Menu::Group, cx))
@@ -694,6 +801,12 @@ impl Browser {
                     .child(self.segment("mode-columns", "カラム", ViewMode::Columns, cx))
                     .child(self.segment("mode-list", "リスト", ViewMode::List, cx))
                     .child(self.segment("mode-icons", "アイコン", ViewMode::Icons, cx)),
+            )
+            .child(
+                Self::tool_button("hidden", "隠し項目", true)
+                    .when(self.settings.show_hidden, |button| button.bg(rgb(theme::SEGMENT)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
             )
             .child(
                 Self::tool_button("settings", "設定", true)
@@ -828,7 +941,7 @@ impl Render for Browser {
         self.window_active = window.is_window_active();
         self.scale = window.scale_factor();
         self.viewport = window.viewport_size();
-        self.watch_scroll(cx);
+        self.watch_scroll(window, cx);
         self.sync_with_listing(window, cx);
         if let Some(path) = self.rename_request.take() {
             self.begin_rename(path, window, cx);
@@ -851,9 +964,12 @@ impl Render for Browser {
         let sidebar = self.sidebar(cx);
         let status = self.status(cx);
         let menu = self.open_menu(cx);
-        let drag_popups = self.drag_popup_views(cx);
         let band = self.band_view();
-        let drag_bar = cx.has_active_drag().then(|| self.drag_bar(cx));
+        let dragging = cx.has_active_drag();
+        if !dragging {
+            self.end_spring();
+        }
+        let drag_bar = dragging.then(|| self.drag_bar(cx));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
         gpui::set_drop_volume(&volume_of(self.history.current()));
         div()
@@ -894,6 +1010,5 @@ impl Render for Browser {
             .children(band)
             .children(drag_bar)
             .children(menu)
-            .children(drag_popups)
     }
 }

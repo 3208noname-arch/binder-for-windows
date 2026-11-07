@@ -243,19 +243,6 @@ impl Browser {
             )
     }
 
-    /// リストの名前の列の横の範囲。Explorerと同じく、その外のドラッグは範囲選択にする。
-    fn name_span(&self, depth: u32) -> Option<(f32, f32, Option<usize>)> {
-        let origin: f32 = self.list_scroll.0.borrow().base_handle.bounds().origin.x.into();
-        let mut left = origin + theme::ROW_SIDE_PADDING;
-        for column in &self.view.columns {
-            if column.field == Field::Name {
-                return Some((left + depth as f32 * theme::INDENT, left + column.width, None));
-            }
-            left += column.width + theme::FIELD_GAP;
-        }
-        None
-    }
-
     /// 名前の表示。編集中なら入力欄を出す。
     pub fn name_or_input(&self, path: &Path, entry: &Entry) -> AnyElement {
         match &self.renaming {
@@ -284,16 +271,25 @@ impl Browser {
         } else {
             slot.into_any_element()
         };
+        let renaming = self.renaming.as_ref().is_some_and(|renaming| renaming.path == path);
+        let label = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .when(renaming, |label| label.flex_1())
+            .child(self.item_icon(entry, icon, theme::ROW_ICON))
+            .child(self.name_or_input(path, entry));
+        let label = self.grab_zone(label, cx);
         div()
             .flex()
             .size_full()
             .items_center()
             .gap_1()
-            .when(self.is_cut(path), |cell| cell.opacity(theme::CUT_OPACITY))
+            .when(self.is_dimmed(path, entry), |cell| cell.opacity(theme::CUT_OPACITY))
             .pl(px(depth as f32 * theme::INDENT))
             .child(disclosure)
-            .child(self.icon(icon, is_dir, theme::ROW_ICON))
-            .child(self.name_or_input(path, entry))
+            .child(label)
             .children(note.map(|note| div().flex_none().text_color(rgb(sub_text)).child(note)))
             .into_any_element()
     }
@@ -333,11 +329,11 @@ impl Browser {
             .gap(px(theme::FIELD_GAP))
             .bg(rgb(background))
             .text_color(rgb(text))
+            .cursor(CursorStyle::Crosshair)
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
             .children(cells);
         let click_path = path.clone();
-        let name_span = self.name_span(depth);
-        self.item_mouse(row, path, is_dir, name_span, cx)
+        self.item_mouse(row, path, is_dir, Some(None), cx)
             .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
@@ -365,6 +361,7 @@ impl Browser {
             .flex_none()
             .w_full()
             .h(px(theme::ROW_HEIGHT))
+            .cursor(CursorStyle::Arrow)
             .items_center()
             .px(px(theme::ROW_SIDE_PADDING))
             .gap(px(theme::FIELD_GAP))
@@ -383,6 +380,7 @@ impl Browser {
             .min_h_0()
             .overflow_x_scroll()
             .track_scroll(&self.list_columns_scroll)
+            .cursor(CursorStyle::Crosshair)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
                 if !event.modifiers.control {

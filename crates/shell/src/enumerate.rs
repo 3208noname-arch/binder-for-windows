@@ -7,12 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FILETIME};
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FIND_FIRST_EX_LARGE_FETCH, FindClose, FindExInfoBasic,
     FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, WIN32_FIND_DATAW,
 };
 use windows::core::PCWSTR;
 
 const BATCH_SIZE: usize = 2000;
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
 pub enum ListEvent {
@@ -146,12 +148,16 @@ fn to_entry(data: &WIN32_FIND_DATAW) -> Option<Entry> {
     if name == "." || name == ".." {
         return None;
     }
+    // OneDriveの実体の無いファイルなども再解析ポイントなので、リンクの種類を見る
+    let reparse = data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_link = reparse && matches!(data.dwReserved0, IO_REPARSE_TAG_MOUNT_POINT | IO_REPARSE_TAG_SYMLINK);
     let to_i64 = |t: FILETIME| (i64::from(t.dwHighDateTime) << 32) | i64::from(t.dwLowDateTime);
     Some(Entry {
         name,
         raw_name,
         is_dir: data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
-        is_link: data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
+        is_link,
+        is_hidden: data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN.0 != 0,
         size: (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow),
         modified: to_i64(data.ftLastWriteTime),
         created: to_i64(data.ftCreationTime),

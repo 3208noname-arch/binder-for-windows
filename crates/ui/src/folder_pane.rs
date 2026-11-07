@@ -72,9 +72,10 @@ fn shuffle(entries: &mut [Entry]) {
 }
 
 impl FolderPane {
-    pub fn new(path: PathBuf, order: SortOrder, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: PathBuf, order: SortOrder, show_hidden: bool, cx: &mut Context<Self>) -> Self {
         let mut state = ListState::new(path.clone());
         state.order = order;
+        state.show_hidden = show_hidden;
         let mut pane = Self {
             state,
             properties: HashMap::new(),
@@ -97,6 +98,11 @@ impl FolderPane {
     pub fn set_wants_properties(&mut self, wants: bool, cx: &mut Context<Self>) {
         self.wants_properties = wants;
         self.start_properties(cx);
+    }
+
+    pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.state.show_hidden = show;
+        self.reload(cx);
     }
 
     /// 読み終えていなければ真。

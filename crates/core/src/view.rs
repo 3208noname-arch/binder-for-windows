@@ -15,32 +15,23 @@ pub enum ViewMode {
     Icons,
 }
 
-/// ドラッグ中にフォルダの上で止まった時の動き。カラム表示は常に列を開く。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DragHover {
-    /// フォルダを開く
-    Open,
-    /// 中身を小さな窓で見せる
-    Popup,
-}
-
 /// アプリ全体の設定。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
     pub grid_selection_matches_hover: bool,
-    pub drag_hover: DragHover,
     /// ドラッグで止まると開く時の、最初の待ち時間（ミリ秒）
     pub spring_first_ms: u64,
     /// ドラッグで止まると開く時の、2回目以降の待ち時間（ミリ秒）
     pub spring_next_ms: u64,
-    /// ドラッグで止まると小窓を出す時の待ち時間（ミリ秒）
-    pub spring_popup_ms: u64,
     /// カラムの列を開くまでの待ち時間（ミリ秒）
     pub spring_column_ms: u64,
-    pub long_name: LongName,
+    /// アイコン表示の長い名前を、マウスを乗せた間に流して見せる
+    pub scroll_long_names: bool,
     pub scrollbar: ScrollbarMode,
+    /// 隠し属性の項目も一覧に出す
+    pub show_hidden: bool,
 }
 
 /// スクロールバーの出し方。
@@ -49,15 +40,6 @@ pub enum ScrollbarMode {
     /// スクロールしている間だけ出す
     WhileScrolling,
     Always,
-}
-
-/// アイコン表示で名前が収まらない時の見せ方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LongName {
-    /// 最後の行を薄くして消す
-    Fade,
-    /// マウスを乗せた間だけ流して見せる
-    Scroll,
 }
 
 /// 待ち時間のスライダーの範囲（ミリ秒）。
@@ -75,13 +57,12 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             grid_selection_matches_hover: true,
-            drag_hover: DragHover::Open,
             spring_first_ms: 1000,
             spring_next_ms: 1500,
-            spring_popup_ms: 500,
             spring_column_ms: 500,
-            long_name: LongName::Fade,
+            scroll_long_names: true,
             scrollbar: ScrollbarMode::WhileScrolling,
+            show_hidden: false,
         }
     }
 }
@@ -381,6 +362,14 @@ mod tests {
         let view: FolderView = serde_json::from_str(r#"{"mode":"Icons"}"#).unwrap();
         assert_eq!(view.mode, ViewMode::Icons);
         assert_eq!(view.group, GroupKey::None);
+    }
+
+    #[test]
+    fn settings_saved_by_an_older_version_still_load() {
+        let text = r#"{"drag_hover":"Popup","long_name":"Fade","spring_popup_ms":500,"spring_first_ms":700}"#;
+        let settings: AppSettings = serde_json::from_str(text).unwrap();
+        assert_eq!(settings.spring_first_ms, 700);
+        assert!(settings.scroll_long_names);
     }
 
     #[test]

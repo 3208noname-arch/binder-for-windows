@@ -77,10 +77,10 @@ mod tests {
     use crate::kind_of;
 
     fn file(name: &str, size: u64, modified: i64) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, size, modified, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, is_hidden: false, size, modified, created: 0 }
     }
     fn dir(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: true, is_link: false, size: 0, modified: 0, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: true, is_link: false, is_hidden: false, size: 0, modified: 0, created: 0 }
     }
     fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()

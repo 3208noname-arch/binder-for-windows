@@ -164,3 +164,36 @@ fn file_names_are_validated() {
     assert!(!valid_file_name("."));
     assert!(!valid_file_name("CON"));
 }
+
+/// 試験用のショートカットを作る。
+fn write_shortcut(file: &std::path::Path, target: &std::path::Path) {
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, IPersistFile};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::{HSTRING, Interface};
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_ALL).unwrap();
+        link.SetPath(&HSTRING::from(target.as_os_str())).unwrap();
+        link.cast::<IPersistFile>().unwrap().Save(&HSTRING::from(file.as_os_str()), true).unwrap();
+    }
+}
+
+#[test]
+fn folder_shortcut_opens_inside_the_app() {
+    filer_shell::init_thread();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("行き先");
+    std::fs::create_dir(&target).unwrap();
+    let file = dir.path().join("近道.lnk");
+    write_shortcut(&file, &target);
+    assert_eq!(filer_shell::resolve_shortcut(&file), Some(target.clone()));
+    assert_eq!(filer_shell::open_target(&file), Ok(filer_shell::Opened::Folder(target)));
+}
+
+#[test]
+fn broken_shortcut_resolves_to_nothing() {
+    filer_shell::init_thread();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("壊れ.lnk");
+    std::fs::write(&file, "x").unwrap();
+    assert_eq!(filer_shell::resolve_shortcut(&file), None);
+}

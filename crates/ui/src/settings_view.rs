@@ -2,7 +2,7 @@
 
 use crate::open_store;
 use crate::theme;
-use filer_core::{AppSettings, DragHover, LongName, MAX_SPRING_MS, MIN_SPRING_MS, ScrollbarMode, snap_spring_ms};
+use filer_core::{AppSettings, MAX_SPRING_MS, MIN_SPRING_MS, ScrollbarMode, snap_spring_ms};
 use filer_store::Store;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Stateful, Window, div, prelude::*,
@@ -18,7 +18,6 @@ pub struct SettingsModel {
 enum Delay {
     OpenFirst,
     OpenNext,
-    Popup,
     Column,
 }
 
@@ -39,7 +38,6 @@ fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
     match delay {
         Delay::OpenFirst => &mut settings.spring_first_ms,
         Delay::OpenNext => &mut settings.spring_next_ms,
-        Delay::Popup => &mut settings.spring_popup_ms,
         Delay::Column => &mut settings.spring_column_ms,
     }
 }
@@ -155,8 +153,6 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.model.read(cx).value.clone();
-        let open = settings.drag_hover == DragHover::Open;
-        let fade = settings.long_name == LongName::Fade;
         let auto_bar = settings.scrollbar == ScrollbarMode::WhileScrolling;
         div()
             .id("settings")
@@ -176,18 +172,14 @@ impl Render for SettingsView {
                     }
                 }),
             )
-            .child(Self::heading("ドラッグ中にフォルダの上で止まった時（リスト、アイコン）"))
-            .child(Self::choice("hover-open", "フォルダを開く", open).on_click(cx.listener(|this, _, _, cx| {
-                this.change(cx, |settings| settings.drag_hover = DragHover::Open);
-            })))
-            .child(Self::choice("hover-popup", "中身を小窓で見せる", !open).on_click(cx.listener(|this, _, _, cx| {
-                this.change(cx, |settings| settings.drag_hover = DragHover::Popup);
-            })))
             .child(Self::heading("ドラッグ中に開くまでの待ち時間"))
             .child(self.slider("delay-first", "フォルダを開く（最初）", Delay::OpenFirst, settings.spring_first_ms, cx))
             .child(self.slider("delay-next", "フォルダを開く（2回目以降）", Delay::OpenNext, settings.spring_next_ms, cx))
-            .child(self.slider("delay-popup", "小窓を出す", Delay::Popup, settings.spring_popup_ms, cx))
             .child(self.slider("delay-column", "カラムの列を開く", Delay::Column, settings.spring_column_ms, cx))
+            .child(Self::heading("一覧"))
+            .child(Self::choice("show-hidden", "隠し項目を表示する（Ctrl+Shift+.）", settings.show_hidden).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.show_hidden = !settings.show_hidden);
+            })))
             .child(Self::heading("スクロールバー"))
             .child(Self::choice("bar-auto", "スクロールしている間だけ出す", auto_bar).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.scrollbar = ScrollbarMode::WhileScrolling);
@@ -196,11 +188,8 @@ impl Render for SettingsView {
                 this.change(cx, |settings| settings.scrollbar = ScrollbarMode::Always);
             })))
             .child(Self::heading("アイコン表示"))
-            .child(Self::choice("long-fade", "長い名前は最後を薄く消す", fade).on_click(cx.listener(|this, _, _, cx| {
-                this.change(cx, |settings| settings.long_name = LongName::Fade);
-            })))
-            .child(Self::choice("long-scroll", "長い名前はマウスを乗せると流して見せる", !fade).on_click(cx.listener(|this, _, _, cx| {
-                this.change(cx, |settings| settings.long_name = LongName::Scroll);
+            .child(Self::choice("long-scroll", "長い名前はマウスを乗せると流して見せる", settings.scroll_long_names).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.scroll_long_names = !settings.scroll_long_names);
             })))
             .child(
                 Self::choice("whole-cell", "選択をアイコン全体のハイライトで示す", settings.grid_selection_matches_hover).on_click(

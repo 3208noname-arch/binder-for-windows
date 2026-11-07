@@ -1,14 +1,15 @@
-//! 名前の変更に使う1行の入力欄。gpuiの入力欄のサンプル（Apache-2.0）を元にしている。
+//! 名前の変更に使う入力欄。gpuiの入力欄のサンプル（Apache-2.0）を元にしている。
 
 use filer_shell::place_ime_caret;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, white,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size, white,
 };
 use std::ops::Range;
 use unicode_segmentation::*;
+use crate::theme;
 
 actions!(
     text_input,
@@ -44,27 +45,100 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// 折り返した文字の、見た目の1行。
+struct VisualLine {
+    range: Range<usize>,
+    /// 折り返す前の1行の中での、この行の始まり
+    start_x: Pixels,
+    /// 欄の左端からの、この行の始まり
+    left: Pixels,
+}
+
+/// 文字の並びと、文字の番号と画面の位置の対応。折り返しの有無によらず同じ形で扱う。
+struct TextLayout {
+    shaped: WrappedLine,
+    lines: Vec<VisualLine>,
+    line_height: Pixels,
+}
+
+impl TextLayout {
+    /// `center` は中央揃えにする欄の幅。
+    fn new(shaped: WrappedLine, center: Option<Pixels>, line_height: Pixels) -> Self {
+        let line = &shaped.unwrapped_layout;
+        let mut marks: Vec<(usize, Pixels)> = vec![(0, px(0.))];
+        for boundary in &shaped.wrap_boundaries {
+            let glyph = &line.runs[boundary.run_ix].glyphs[boundary.glyph_ix];
+            marks.push((glyph.index, glyph.position.x));
+        }
+        marks.push((shaped.len(), line.width));
+        let lines = marks
+            .windows(2)
+            .map(|pair| {
+                let ((start, start_x), (end, end_x)) = (pair[0], pair[1]);
+                let left = center.map_or(px(0.), |width| (width - (end_x - start_x)) / 2.);
+                VisualLine { range: start..end, start_x, left }
+            })
+            .collect();
+        Self { shaped, lines, line_height }
+    }
+
+    fn line_of(&self, index: usize) -> usize {
+        self.lines.iter().rposition(|line| line.range.start <= index).unwrap_or(0)
+    }
+
+    /// 文字の番号の位置。欄の左上からの距離。
+    fn position(&self, index: usize) -> Point<Pixels> {
+        let row = self.line_of(index);
+        let line = &self.lines[row];
+        let x = self.shaped.unwrapped_layout.x_for_index(index) - line.start_x + line.left;
+        point(x, self.line_height * row as f32)
+    }
+
+    /// 欄の左上からの距離に、いちばん近い文字の番号。
+    fn index_at(&self, position: Point<Pixels>) -> usize {
+        let row = (f32::from(position.y / self.line_height).max(0.) as usize).min(self.lines.len() - 1);
+        let line = &self.lines[row];
+        let index = self.shaped.unwrapped_layout.closest_index_for_x(position.x - line.left + line.start_x);
+        index.clamp(line.range.start, line.range.end)
+    }
+
+    /// 範囲を見た目の行ごとに切った、欄の左上からの四角。
+    fn rectangles(&self, range: &Range<usize>) -> Vec<Bounds<Pixels>> {
+        self.lines
+            .iter()
+            .filter(|line| line.range.start < range.end && range.start < line.range.end)
+            .map(|line| {
+                let (start, end) = (range.start.max(line.range.start), range.end.min(line.range.end));
+                let top = self.lines.iter().position(|other| other.range == line.range).unwrap_or(0) as f32;
+                let unwrapped = &self.shaped.unwrapped_layout;
+                let x = |index| unwrapped.x_for_index(index) - line.start_x + line.left;
+                Bounds::new(point(x(start), self.line_height * top), size(x(end) - x(start), self.line_height))
+            })
+            .collect()
+    }
+}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
-    placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
+    last_layout: Option<TextLayout>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     /// 長い名前の時に、文字カーソルが見えるよう左へずらす量
     shift: Pixels,
+    /// 折り返す幅。無ければ1行で横に送る
+    wrap: Option<f32>,
 }
 
 impl TextInput {
-    /// `selected` の範囲を選んだ状態で作る。範囲はバイト単位。
-    pub fn new(text: String, selected: Range<usize>, cx: &mut Context<Self>) -> Self {
+    /// `selected` の範囲を選んだ状態で作る。範囲はバイト単位。`wrap` は折り返す幅。
+    pub fn new(text: String, selected: Range<usize>, wrap: Option<f32>, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             content: text.into(),
-            placeholder: "".into(),
             selected_range: selected,
             selection_reversed: false,
             marked_range: None,
@@ -72,6 +146,7 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             shift: px(0.),
+            wrap,
         }
     }
 
@@ -213,7 +288,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left() + self.shift)
+        line.index_at(point(position.x - bounds.left() + self.shift, position.y - bounds.top()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -382,17 +457,12 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
+        let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let (start, end) = (layout.position(range.start), layout.position(range.end));
         Some(Bounds::from_corners(
-            point(
-                bounds.left() + last_layout.x_for_index(range.start),
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + last_layout.x_for_index(range.end),
-                bounds.bottom(),
-            ),
+            point(bounds.left() + start.x, bounds.top() + start.y),
+            point(bounds.left() + end.x, bounds.top() + end.y + layout.line_height),
         ))
     }
 
@@ -402,11 +472,8 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let line_point = self.last_bounds?.localize(&point)?;
-        let last_layout = self.last_layout.as_ref()?;
-
-        assert_eq!(last_layout.text, self.content);
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let local = self.last_bounds?.localize(&point)?;
+        let utf8_index = self.last_layout.as_ref()?.index_at(local);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -416,10 +483,43 @@ struct TextElement {
 }
 
 struct PrepaintState {
-    line: Option<ShapedLine>,
+    layout: Option<TextLayout>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
     shift: Pixels,
+}
+
+/// 入力欄の文字を組む。
+fn shape(input: &TextInput, window: &mut Window) -> Option<WrappedLine> {
+    let style = window.text_style();
+    let content = input.content.clone();
+    let run = TextRun {
+        len: content.len(),
+        font: style.font(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let runs: Vec<TextRun> = if let Some(marked_range) = input.marked_range.as_ref() {
+        vec![
+            TextRun { len: marked_range.start, ..run.clone() },
+            TextRun {
+                len: marked_range.end - marked_range.start,
+                underline: Some(UnderlineStyle { color: Some(run.color), thickness: px(1.0), wavy: false }),
+                ..run.clone()
+            },
+            TextRun { len: content.len() - marked_range.end, ..run },
+        ]
+        .into_iter()
+        .filter(|run| run.len > 0)
+        .collect()
+    } else {
+        vec![run]
+    };
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let wrap = input.wrap.map(px);
+    window.text_system().shape_text(content, font_size, &runs, wrap, None).ok()?.into_iter().next()
 }
 
 impl IntoElement for TextElement {
@@ -449,9 +549,11 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let line_height = window.line_height();
+        let rows = shape(self.input.read(cx), window).map_or(1, |line| line.wrap_boundaries.len() + 1);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        style.size.height = (line_height * rows as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -465,95 +567,25 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
-        let style = window.text_style();
+        let line_height = window.line_height();
+        let center = input.wrap.map(|_| bounds.size.width);
+        let layout = shape(input, window).map(|line| TextLayout::new(line, center, line_height));
 
-        let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
-        } else {
-            (content, style.color)
-        };
-
-        let run = TextRun {
-            len: display_text.len(),
-            font: style.font(),
-            color: text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: display_text.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect()
-        } else {
-            vec![run]
-        };
-
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
-
-        let cursor_pos = line.x_for_index(cursor);
-        let shift = (cursor_pos + px(2.) - bounds.size.width).max(px(0.));
-        let left = bounds.left() - shift;
+        let at = |index: usize| layout.as_ref().map_or(point(px(0.), px(0.)), |layout| layout.position(index));
+        let cursor_at = at(cursor);
+        let shift = if center.is_some() { px(0.) } else { (cursor_at.x + px(2.) - bounds.size.width).max(px(0.)) };
+        let origin = point(bounds.left() - shift, bounds.top());
         let (selection, cursor) = if selected_range.is_empty() {
-            (
-                None,
-                Some(fill(
-                    Bounds::new(
-                        point(left + cursor_pos, bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
-                    ),
-                    gpui::blue(),
-                )),
-            )
+            let caret = Bounds::new(origin + cursor_at, size(px(2.), line_height));
+            (Vec::new(), Some(fill(caret, gpui::blue())))
         } else {
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(
-                            left + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            left + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
-                    ),
-                    rgba(0x3311ff30),
-                )),
-                None,
-            )
+            let parts = layout.as_ref().map_or(Vec::new(), |layout| layout.rectangles(&selected_range));
+            let quads = parts.into_iter().map(|part| fill(Bounds::new(origin + part.origin, part.size), rgba(0x3311ff30))).collect();
+            (quads, None)
         };
-        PrepaintState {
-            line: Some(line),
-            cursor,
-            selection,
-            shift,
-        }
+        PrepaintState { layout, cursor, selection, shift }
     }
 
     fn paint(
@@ -567,6 +599,7 @@ impl Element for TextElement {
         cx: &mut App,
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
+        let wrapped = self.input.read(cx).wrap.is_some();
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
@@ -575,15 +608,16 @@ impl Element for TextElement {
         let shift = prepaint.shift;
         // 欄からはみ出た文字は描かない
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if let Some(selection) = prepaint.selection.take() {
+            for selection in std::mem::take(&mut prepaint.selection) {
                 window.paint_quad(selection)
             }
             let origin = point(bounds.left() - shift, bounds.top());
-            if let Some(line) = &prepaint.line {
-                line.paint(origin, window.line_height(), window, cx).unwrap();
+            let align = if wrapped { TextAlign::Center } else { TextAlign::Left };
+            if let Some(layout) = &prepaint.layout {
+                layout.shaped.paint(origin, window.line_height(), align, Some(bounds), window, cx).unwrap();
             }
         });
-        let line = prepaint.line.take().unwrap();
+        let layout = prepaint.layout.take();
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
@@ -599,7 +633,7 @@ impl Element for TextElement {
         }
 
         self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
+            input.last_layout = layout;
             input.last_bounds = Some(bounds);
             input.shift = shift;
         });
@@ -608,6 +642,10 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (text_size, line_height) = match self.wrap {
+            Some(_) => (theme::SMALL_TEXT_SIZE, theme::GRID_LABEL_LINE),
+            None => (13., 18.),
+        };
         div()
             .flex()
             .key_context("TextInput")
@@ -631,11 +669,11 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(px(18.))
-            .text_size(px(13.))
+            .line_height(px(line_height))
+            .text_size(px(text_size))
             .child(
                 div()
-                    .h(px(20.))
+                    .when(self.wrap.is_none(), |field| field.h(px(20.)))
                     .w_full()
                     .px(px(3.)).py(px(1.)).border_1().border_color(rgb(0x0a64d8)).rounded_sm().text_color(rgb(0x1f2023))
                     .bg(white())

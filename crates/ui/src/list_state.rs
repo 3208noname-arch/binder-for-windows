@@ -10,6 +10,7 @@ pub struct ListState {
     pub error: Option<String>,
     pub loading: bool,
     pub generation: u64,
+    pub show_hidden: bool,
     /// 再読み込みの途中で届いた分。終わるまで今の一覧を見せ続ける
     incoming: Option<Vec<Entry>>,
 }
@@ -17,7 +18,7 @@ pub struct ListState {
 impl ListState {
     pub fn new(path: PathBuf) -> Self {
         let order = SortOrder { key: SortKey::Name, descending: false };
-        Self { path, entries: Vec::new(), order, error: None, loading: false, generation: 0, incoming: None }
+        Self { path, entries: Vec::new(), order, error: None, loading: false, generation: 0, show_hidden: false, incoming: None }
     }
 
     /// 別のフォルダへ移る。返した世代より古い列挙の結果は `apply` で捨てる。
@@ -43,6 +44,13 @@ impl ListState {
         if generation != self.generation {
             return;
         }
+        let event = match event {
+            ListEvent::Batch(mut batch) => {
+                batch.retain(|entry| self.show_hidden || !entry.is_hidden);
+                ListEvent::Batch(batch)
+            }
+            other => other,
+        };
         match (event, &mut self.incoming) {
             (ListEvent::Batch(batch), Some(incoming)) => incoming.extend(batch),
             (ListEvent::Batch(batch), None) => insert_sorted(&mut self.entries, batch, self.order, compare_names),
@@ -175,10 +183,25 @@ mod tests {
     }
 
     fn file(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, size: 0, modified: 0, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, is_hidden: false, size: 0, modified: 0, created: 0 }
     }
     fn names(state: &ListState) -> Vec<&str> {
         state.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn hidden_entries_appear_only_when_asked_for() {
+        let hidden = Entry { is_hidden: true, ..file("secret") };
+        let mut s = ListState::new("a".into());
+        let g = s.open("a".into());
+        s.apply(g, ListEvent::Batch(vec![file("plain"), hidden.clone()]));
+        s.apply(g, ListEvent::Done);
+        assert_eq!(names(&s), ["plain"]);
+        s.show_hidden = true;
+        let g = s.reload();
+        s.apply(g, ListEvent::Batch(vec![file("plain"), hidden]));
+        s.apply(g, ListEvent::Done);
+        assert_eq!(names(&s), ["plain", "secret"]);
     }
 
     #[test]

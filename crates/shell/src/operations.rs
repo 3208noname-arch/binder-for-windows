@@ -3,7 +3,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, POINT};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, IPersistFile, STGM_READ};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     RegisterClipboardFormatW, SetClipboardData,
@@ -13,10 +13,10 @@ use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::UI::Shell::{
     DROPFILES, DragQueryFileW, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR,
     FOF_NOERRORUI, FOF_RENAMEONCOLLISION, FOF_SILENT, FOF_WANTNUKEWARNING, FOFX_RECYCLEONDELETE, FileOperation, HDROP, IFileOperation,
-    IShellItem, SHCreateItemFromParsingName, ShellExecuteW,
+    IShellItem, IShellLinkW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 /// ファイル操作。実行はWindowsの `IFileOperation` に任せる。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,12 +170,47 @@ fn run(operation: &Operation, prompt: Prompt) -> windows::core::Result<bool> {
     }
 }
 
-/// 関連付けられたアプリで開く。
-pub fn open_path(path: &Path) -> Result<(), String> {
-    let path = HSTRING::from(path.as_os_str());
-    let result = unsafe { ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL) };
-    // 32以下は失敗の番号
-    if result.0 as isize > 32 { Ok(()) } else { Err(format!("開けませんでした（{}）", result.0 as isize)) }
+/// 項目を開いた結果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Opened {
+    /// 関連付けられたアプリへ渡した
+    Launched,
+    /// フォルダへのショートカットだった。アプリの中で開く
+    Folder(PathBuf),
+}
+
+/// ショートカットの指す先。壊れたファイルや、ファイルシステムの外を指す時は `None`。
+pub fn resolve_shortcut(path: &Path) -> Option<PathBuf> {
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_ALL).ok()?;
+        link.cast::<IPersistFile>().ok()?.Load(&HSTRING::from(path.as_os_str()), STGM_READ).ok()?;
+        let mut buffer = [0u16; 32768];
+        link.GetPath(&mut buffer, std::ptr::null_mut(), 0).ok()?;
+        let length = buffer.iter().position(|&c| c == 0)?;
+        (length > 0).then(|| PathBuf::from(OsString::from_wide(&buffer[..length])))
+    }
+}
+
+/// ファイルを開く。フォルダへのショートカットはアプリの中で開けるよう、行き先を返す。
+///
+/// シェルは内部でウィンドウのメッセージを回すので、gpuiの更新処理の中で呼ぶと、
+/// 届いた裏の処理が更新を重ねて落ちる。遅いNASでも待たされないよう、裏のスレッドで呼ぶ。
+pub fn open_target(path: &Path) -> Result<Opened, String> {
+    let is_link = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"));
+    if let Some(target) = is_link.then(|| resolve_shortcut(path)).flatten().filter(|target| target.is_dir()) {
+        return Ok(Opened::Folder(target));
+    }
+    let file = HSTRING::from(path.as_os_str());
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        // スレッドがすぐ終わるので、渡し終えるまで待つ
+        fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info) }.map(|()| Opened::Launched).map_err(|error| format!("開けませんでした（{}）", error.message()))
 }
 
 /// 新規フォルダの名前を、重ならないように決める。

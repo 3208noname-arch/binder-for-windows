@@ -71,13 +71,13 @@ fn key(folder: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filer_core::{DragHover, GroupKey, ViewMode};
+    use filer_core::{GroupKey, ViewMode};
 
     #[test]
     fn app_settings_come_back_after_reopening() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("s.sqlite");
-        let settings = AppSettings { drag_hover: DragHover::Popup, ..AppSettings::default() };
+        let settings = AppSettings { show_hidden: true, ..AppSettings::default() };
         Store::open(&file).unwrap().save_app_settings(&settings).unwrap();
         assert_eq!(Store::open(&file).unwrap().app_settings(), settings);
     }

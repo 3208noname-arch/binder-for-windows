@@ -111,10 +111,10 @@ mod tests {
     }
 
     fn dir(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: true, is_link: false, size: 0, modified: 0, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: true, is_link: false, is_hidden: false, size: 0, modified: 0, created: 0 }
     }
     fn file(name: &str) -> Entry {
-        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, size: 0, modified: 0, created: 0 }
+        Entry { name: name.into(), raw_name: None, is_dir: false, is_link: false, is_hidden: false, size: 0, modified: 0, created: 0 }
     }
     fn shape(flat: &Flattened, lists: &HashMap<PathBuf, &[Entry]>) -> Vec<(u32, String)> {
         flat.rows
