@@ -152,7 +152,7 @@ impl Browser {
         }
     }
 
-    fn ordered_paths(&mut self, cx: &Context<Self>) -> Vec<PathBuf> {
+    pub fn ordered_paths(&mut self, cx: &Context<Self>) -> Vec<PathBuf> {
         self.visible_items(cx).into_iter().map(|(_, path)| path).collect()
     }
 

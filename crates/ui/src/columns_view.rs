@@ -153,13 +153,38 @@ impl Browser {
     fn click_column_item(&mut self, column: usize, path: PathBuf, name: OsString, entry: Entry, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.active_column = column;
         let modifiers = event.modifiers();
-        if event.click_count() == 2 || modifiers.control || modifiers.shift {
-            let is_dir = entry.is_dir;
-            self.click_item(path, is_dir, event, window, cx);
+        if modifiers.control || modifiers.shift {
+            let held = self.column_selected_path(column, cx).filter(|path| self.selection.contains(path));
+            self.click_item(path, entry.is_dir, event, window, cx);
+            if held.is_some_and(|path| !self.selection.contains(&path)) {
+                self.release_column_item(column, cx);
+            }
+        } else if event.click_count() == 2 {
+            self.click_item(path, entry.is_dir, event, window, cx);
         } else {
             self.select_in_column(column, name, entry, cx);
             window.focus(&self.focus);
         }
+    }
+
+    /// 列で開いている項目のパス。
+    fn column_selected_path(&self, column: usize, cx: &Context<Self>) -> Option<PathBuf> {
+        let current = self.columns.get(column)?;
+        Some(current.pane.read(cx).state.path.join(current.selected.as_ref()?))
+    }
+
+    /// 列で開いていた項目が選択から外れた時に、右の列とプレビューも閉じる。
+    /// 閉じた列にあった選択は、見えないまま操作の対象にならないよう外す。
+    fn release_column_item(&mut self, column: usize, cx: &mut Context<Self>) {
+        let Some(current) = self.columns.get_mut(column) else { return };
+        current.selected = None;
+        self.columns.truncate(column + 1);
+        self.active_column = column;
+        self.preview = None;
+        self.column_anchor = self.column_anchor.filter(|&anchor| anchor <= column);
+        let ordered = self.ordered_paths(cx);
+        self.selection.retain_existing(&ordered);
+        cx.notify();
     }
 
     /// クリックを通らずに行を選ぶ時に使う。カラムでは列の選択と右の列も一緒に変える。
