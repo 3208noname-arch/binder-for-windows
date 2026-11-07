@@ -7,7 +7,7 @@ mod selection;
 mod sort;
 mod view;
 
-pub use entry::{Entry, format_size, kind_of};
+pub use entry::{Entry, SearchQuery, format_size, kind_of};
 pub use group::{Date, Group, GroupKey, Properties, date_group, name_group, size_group, value_group};
 pub use history::History;
 pub use selection::Selection;

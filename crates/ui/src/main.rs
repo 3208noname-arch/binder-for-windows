@@ -11,6 +11,7 @@ mod list_state;
 mod list_tree;
 mod list_view;
 mod scrollbar;
+mod search;
 mod settings_view;
 mod size_cache;
 mod text_input;

@@ -14,7 +14,7 @@ pub use context_menu::{MenuChoice, drag_items, preload_items_menu, show_folder_m
 pub use ime::{cursor_position, left_button_down, place_ime_caret, remove_ime_caret};
 pub use watch::{WatchJob, watch_folder};
 
-pub use enumerate::{FolderSize, ListEvent, ListJob, folder_size, long_path, should_flush, start_list};
+pub use enumerate::{FolderSize, ListEvent, ListJob, folder_size, long_path, should_flush, start_list, start_search};
 pub use icons::{drive_label, drives, favorites, init_thread, load_icon};
 pub use name_cmp::compare_names;
 pub use operations::{

@@ -78,6 +78,8 @@ pub enum Field {
     Author,
     Tags,
     Title,
+    /// 検索結果のある場所。検索の時だけ出す
+    Location,
 }
 
 impl Field {
@@ -102,6 +104,7 @@ impl Field {
             Field::Author => "作成者",
             Field::Tags => "タグ",
             Field::Title => "タイトル",
+            Field::Location => "場所",
         }
     }
 
@@ -112,6 +115,7 @@ impl Field {
             Field::Size => 90.0,
             Field::Kind => 110.0,
             Field::Author | Field::Tags | Field::Title => 140.0,
+            Field::Location => 260.0,
         }
     }
 
@@ -123,7 +127,7 @@ impl Field {
             Field::Created => Some(SortKey::Created),
             Field::Size => Some(SortKey::Size),
             Field::Kind => Some(SortKey::Kind),
-            Field::Author | Field::Tags | Field::Title => None,
+            Field::Author | Field::Tags | Field::Title | Field::Location => None,
         }
     }
 

@@ -39,6 +39,29 @@ impl Entry {
     }
 }
 
+/// 検索の条件。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchQuery {
+    /// 小文字にした語。すべてを含む名前が一致する
+    pub terms: Vec<String>,
+    /// 配下のフォルダも探す
+    pub recursive: bool,
+    /// 隠し属性のフォルダの中も探す
+    pub hidden: bool,
+}
+
+impl SearchQuery {
+    /// 検索欄の文字から作る。空白で区切った語をすべて含む名前を探す。
+    pub fn new(text: &str, recursive: bool) -> Self {
+        Self { terms: text.to_lowercase().split_whitespace().map(str::to_string).collect(), recursive, hidden: false }
+    }
+
+    pub fn matches(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        self.terms.iter().all(|term| name.contains(term.as_str()))
+    }
+}
+
 /// サイズの列に出す文字列。Finderに合わせて1000単位で表す。
 pub fn format_size(size: u64) -> String {
     if size < 1000 {
@@ -67,7 +90,16 @@ pub fn kind_of(entry: &Entry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, format_size};
+    use super::{Entry, SearchQuery, format_size};
+
+    #[test]
+    fn search_needs_every_word_and_ignores_case() {
+        let query = SearchQuery::new("  Report 2026　", true);
+        assert_eq!(query.terms, ["report", "2026"]);
+        assert!(query.matches("年次REPORT-2026.pdf"));
+        assert!(!query.matches("report-2025.pdf"));
+        assert!(SearchQuery::new(" ", true).terms.is_empty());
+    }
 
     fn named(name: &str, is_link: bool) -> Entry {
         Entry { name: name.into(), raw_name: None, is_dir: false, is_link, is_hidden: false, size: 0, modified: 0, created: 0 }

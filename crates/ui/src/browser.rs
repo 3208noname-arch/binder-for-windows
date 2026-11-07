@@ -5,6 +5,7 @@ use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::icons_view::GridData;
 use crate::list_tree::Flattened;
+use crate::search::{SearchBox, SearchRun};
 use crate::size_cache::SizeCache;
 use crate::theme;
 use filer_core::{
@@ -83,6 +84,10 @@ pub struct Browser {
     pub focus: FocusHandle,
     pub message: Option<String>,
     pub renaming: Option<Renaming>,
+    pub search_box: Option<SearchBox>,
+    pub search_run: Option<SearchRun>,
+    /// 次の描画で、一覧へフォーカスを戻す
+    pub refocus: bool,
     pub pending_rename: Option<PathBuf>,
     pub press: Option<RowPress>,
     pub undo: Vec<Operation>,
@@ -190,6 +195,9 @@ impl Browser {
             focus: focus.clone(),
             message: None,
             renaming: None,
+            search_box: None,
+            search_run: None,
+            refocus: false,
             pending_rename: None,
             press: None,
             undo: Vec::new(),
@@ -298,9 +306,11 @@ impl Browser {
     }
 
     fn apply_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
+        let saved = self.search_run.iter().flat_map(|run| run.panes()).cloned();
         let panes = std::iter::once(self.pane.clone())
             .chain(self.columns.iter().map(|column| column.pane.clone()))
-            .chain(self.expanded.values().cloned());
+            .chain(self.expanded.values().cloned())
+            .chain(saved);
         for pane in panes.collect::<Vec<_>>() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
         }
@@ -386,6 +396,7 @@ impl Browser {
     }
 
     fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.drop_search(cx);
         self.selection.clear();
         self.message = None;
         self.menu = None;
@@ -407,6 +418,7 @@ impl Browser {
     }
 
     pub fn back(&mut self, cx: &mut Context<Self>) {
+        self.drop_search(cx);
         if self.leave_pinned_column(cx) {
             return;
         }
@@ -422,6 +434,7 @@ impl Browser {
     }
 
     pub fn parent(&mut self, cx: &mut Context<Self>) {
+        self.drop_search(cx);
         if self.leave_pinned_column(cx) {
             return;
         }
@@ -464,7 +477,8 @@ impl Browser {
 
     /// 幅のドラッグの終わりなど、値を変えた後で保存する。
     pub fn save_active_view(&self, cx: &Context<Self>) {
-        let Some(store) = &self.store else { return };
+        // 検索の結果の表示は、そのフォルダの設定ではない
+        let Some(store) = self.store.as_ref().filter(|_| self.search_run.is_none()) else { return };
         let result = if self.in_child_column() {
             let column = &self.columns[self.active_column];
             store.save_folder_view(&column.pane.read(cx).state.path, &column.view)
@@ -485,6 +499,7 @@ impl Browser {
 
     /// 表示形式を変える。見ていたフォルダはそのまま引き継ぐ。
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        self.drop_search(cx);
         if mode == self.view.mode {
             return;
         }
@@ -761,14 +776,15 @@ impl Browser {
 
     fn open_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let top = px(theme::TOOLBAR_HEIGHT);
+        let shift = if self.search_box.is_some() { theme::SEARCH_FIELD_WIDTH - theme::SEARCH_BUTTON_WIDTH } else { 0. };
         Some(match self.menu? {
             Menu::Sort => {
                 let items = self.sort_menu(cx);
-                Self::popup(|d| d.top(top).right(px(theme::MENU_RIGHT_SORT)), items).into_any_element()
+                Self::popup(|d| d.top(top).right(px(theme::MENU_RIGHT_SORT + shift)), items).into_any_element()
             }
             Menu::Group => {
                 let items = self.group_menu(cx);
-                Self::popup(|d| d.top(top).right(px(theme::GROUP_MENU_RIGHT)), items).into_any_element()
+                Self::popup(|d| d.top(top).right(px(theme::GROUP_MENU_RIGHT + shift)), items).into_any_element()
             }
             Menu::Fields(position) => {
                 let items = self.fields_menu(cx);
@@ -846,6 +862,13 @@ impl Browser {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
             )
+            .child(match &self.search_box {
+                Some(search) => div().flex_none().w(px(theme::SEARCH_FIELD_WIDTH)).child(search.input.clone()).into_any_element(),
+                None => Self::tool_button("search", "検索", true)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)))
+                    .into_any_element(),
+            })
             .child(
                 Self::tool_button("settings", "設定", true)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -945,7 +968,8 @@ impl Browser {
             .children(icon_size)
             .children(self.message.clone().map(|message| div().flex_none().text_color(rgb(theme::ERROR_TEXT)).child(message)))
             .child(div().flex_none().child(if state.loading {
-                format!("読み込み中… {count} 項目")
+                let doing = if self.search_run.is_some() { "検索中" } else { "読み込み中" };
+                format!("{doing}… {count} 項目")
             } else if pane.properties_loading() {
                 format!("{count} 項目　プロパティを読み込み中… {}/{count}", pane.properties.len())
             } else {
@@ -979,6 +1003,9 @@ impl Render for Browser {
         self.window_active = window.is_window_active();
         self.scale = window.scale_factor();
         self.viewport = window.viewport_size();
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus);
+        }
         self.watch_scroll(window, cx);
         self.sync_with_listing(window, cx);
         if let Some(path) = self.rename_request.take() {
@@ -999,6 +1026,7 @@ impl Render for Browser {
             (None, ViewMode::Icons) => self.render_icons(window, cx).into_any_element(),
         };
         let toolbar = self.toolbar(cx);
+        let search_bar = self.search_bar(cx);
         let sidebar = self.sidebar(cx);
         let status = self.status(cx);
         let menu = self.open_menu(cx);
@@ -1037,6 +1065,7 @@ impl Render for Browser {
                 }),
             )
             .child(toolbar)
+            .children(search_bar)
             .on_drag_move::<ExternalPaths>(cx.listener(|this, _: &DragMoveEvent<ExternalPaths>, _, cx| {
                 if !this.drag_seen {
                     this.drag_seen = true;

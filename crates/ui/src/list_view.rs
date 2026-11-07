@@ -102,6 +102,10 @@ impl Browser {
             Field::Author => properties().map(|p| p.author).unwrap_or_default(),
             Field::Tags => properties().map(|p| p.tags).unwrap_or_default(),
             Field::Title => properties().map(|p| p.title).unwrap_or_default(),
+            Field::Location => match Path::new(entry.os_name()).parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.display().to_string(),
+                _ => "（このフォルダ）".to_string(),
+            },
         }
     }
 
@@ -258,7 +262,7 @@ impl Browser {
         let expanded = expanded.is_some();
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
         let slot = div().flex_none().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
-        let disclosure = if is_dir {
+        let disclosure = if is_dir && self.search_run.is_none() {
             let target = path.to_path_buf();
             slot.id(gpui::ElementId::Name(format!("open-{}", path.display()).into()))
                 .cursor(CursorStyle::PointingHand)

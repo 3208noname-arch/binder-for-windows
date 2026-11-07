@@ -783,6 +783,7 @@ impl Browser {
         let wrap = (self.view.mode == ViewMode::Icons).then(|| theme::grid_label_width(self.view.icon_size));
         let input = cx.new(|cx| TextInput::new(name, 0..stem, wrap, cx));
         let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+            InputEvent::Changed => {}
             InputEvent::Submit => this.commit_rename(window, cx),
             InputEvent::Cancel => this.end_rename(window, cx),
         });
@@ -871,7 +872,7 @@ impl Browser {
 
     pub fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.soft_selection = false;
-        if self.renaming.is_some() {
+        if self.renaming.is_some() || self.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window)) {
             return;
         }
         let keystroke = &event.keystroke;
@@ -894,10 +895,12 @@ impl Browser {
             "right" if mode == ViewMode::Columns => self.step_column(true, cx),
             "enter" => self.open_selection(cx),
             "backspace" => self.back(cx),
+            "escape" if self.search_box.is_some() => self.drop_search(cx),
             "escape" => {
                 self.cut.clear();
                 self.clear_selection(cx);
             }
+            "f" if control => self.open_search(window, cx),
             "delete" => self.recycle_selection(cx),
             "f2" => {
                 if let [path] = self.selection.paths().as_slice() {

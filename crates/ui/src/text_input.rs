@@ -18,6 +18,8 @@ actions!(
 
 /// 入力欄の結果。
 pub enum InputEvent {
+    /// 文字が確定して変わった
+    Changed,
     Submit,
     Cancel,
 }
@@ -416,6 +418,7 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        cx.emit(InputEvent::Changed);
         cx.notify();
     }
 

@@ -1,9 +1,9 @@
 use crate::list_state::{ListState, coalesce};
 use crate::list_tree::{Flattened, flatten, flatten_grouped};
 use filer_core::{
-    Date, Entry, Group, GroupKey, Properties, SortKey, SortOrder, date_group, name_group, size_group, value_group,
+    Date, Entry, Group, GroupKey, Properties, SearchQuery, SortKey, SortOrder, date_group, name_group, size_group, value_group,
 };
-use filer_shell::{ListJob, PropertiesJob, WatchJob, local_date, start_list, start_properties, watch_folder};
+use filer_shell::{ListJob, PropertiesJob, WatchJob, local_date, start_list, start_properties, start_search, watch_folder};
 use futures::StreamExt;
 use gpui::{Context, Task};
 use std::collections::HashMap;
@@ -21,6 +21,8 @@ pub struct FolderPane {
     pub version: u64,
     wants_properties: bool,
     reload_again: bool,
+    /// 検索の結果を出している時の条件
+    search: Option<SearchQuery>,
     job: Option<ListJob>,
     loader: Option<Task<()>>,
     properties_job: Option<PropertiesJob>,
@@ -73,15 +75,39 @@ fn shuffle(entries: &mut [Entry]) {
 
 impl FolderPane {
     pub fn new(path: PathBuf, order: SortOrder, show_hidden: bool, cx: &mut Context<Self>) -> Self {
-        let mut state = ListState::new(path.clone());
+        let mut pane = Self::empty(path.clone(), order, show_hidden);
+        pane.open(path, cx);
+        pane
+    }
+
+    /// `path` の中の検索結果を出す。フォルダの変更は見張らず、操作の後の読み直しで更新する。
+    pub fn new_search(path: PathBuf, order: SortOrder, show_hidden: bool, query: SearchQuery, cx: &mut Context<Self>) -> Self {
+        let mut pane = Self::empty(path, order, show_hidden);
+        pane.set_query(query, cx);
+        pane
+    }
+
+    /// 検索の条件を変えて探し直す。
+    pub fn set_query(&mut self, query: SearchQuery, cx: &mut Context<Self>) {
+        self.search = Some(query);
+        self.version += 1;
+        self.reload_again = false;
+        let path = self.state.path.clone();
+        let generation = self.state.open(path.clone());
+        self.start_listing(generation, path, cx);
+    }
+
+    fn empty(path: PathBuf, order: SortOrder, show_hidden: bool) -> Self {
+        let mut state = ListState::new(path);
         state.order = order;
         state.show_hidden = show_hidden;
-        let mut pane = Self {
+        Self {
             state,
             properties: HashMap::new(),
             version: 0,
             wants_properties: false,
             reload_again: false,
+            search: None,
             job: None,
             loader: None,
             properties_job: None,
@@ -89,9 +115,7 @@ impl FolderPane {
             watch_job: None,
             watch_loader: None,
             measure: None,
-        };
-        pane.open(path, cx);
-        pane
+        }
     }
 
     /// 作成者などでのグループ分けに使う時だけ、裏でプロパティを読む。
@@ -174,9 +198,14 @@ impl FolderPane {
 
     fn start_listing(&mut self, generation: u64, path: PathBuf, cx: &mut Context<Self>) {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        self.job = Some(start_list(path, move |event| {
+        let send = move |event| {
             let _ = tx.unbounded_send(event);
-        }));
+        };
+        let search = self.search.clone().map(|query| SearchQuery { hidden: self.state.show_hidden, ..query });
+        self.job = Some(match search {
+            Some(query) => start_search(path, query, send),
+            None => start_list(path, send),
+        });
         self.loader = Some(cx.spawn(async move |this, cx| {
             while let Some(first) = rx.next().await {
                 let mut events = vec![first];

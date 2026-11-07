@@ -1,4 +1,5 @@
-use filer_core::Entry;
+use filer_core::{Entry, SearchQuery};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -99,6 +100,47 @@ fn enumerate(
         on_event(ListEvent::Batch(batch));
     }
     result
+}
+
+/// `root` の中で名前の一致する項目を探す。近い階層から順に、見つかった分を渡す。
+///
+/// 項目の `raw_name` は `root` からの相対パスにする。一覧の側は `root` との連結でパスを作るので、
+/// 検索の結果を1つのフォルダの一覧と同じに扱える。読めないフォルダは飛ばす。
+pub fn start_search(root: PathBuf, query: SearchQuery, mut on_event: impl FnMut(ListEvent) + Send + 'static) -> ListJob {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = cancelled.clone();
+    std::thread::spawn(move || {
+        let mut found = Vec::with_capacity(BATCH_SIZE);
+        let mut last_flush = Instant::now();
+        let mut folders = VecDeque::from([PathBuf::new()]);
+        while let Some(relative) = folders.pop_front() {
+            let mut add = |event| {
+                let ListEvent::Batch(batch) = event else { return };
+                for entry in batch {
+                    let path = relative.join(entry.os_name());
+                    if query.recursive && entry.is_dir && !entry.is_link && (query.hidden || !entry.is_hidden) {
+                        folders.push_back(path.clone());
+                    }
+                    if query.matches(&entry.name) {
+                        found.push(Entry { raw_name: Some(path.into_os_string()), ..entry });
+                    }
+                }
+                if should_flush(found.len(), last_flush.elapsed()) {
+                    on_event(ListEvent::Batch(std::mem::take(&mut found)));
+                    last_flush = Instant::now();
+                }
+            };
+            let _ = enumerate(&root.join(&relative), &flag, &mut add);
+            if flag.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        if !found.is_empty() {
+            on_event(ListEvent::Batch(found));
+        }
+        on_event(ListEvent::Done);
+    });
+    ListJob { cancelled }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

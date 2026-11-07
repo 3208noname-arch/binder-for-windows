@@ -218,3 +218,34 @@ fn compare_names_is_numeric() {
     assert_eq!(compare_names("B", "a"), Ordering::Greater);
     assert_eq!(compare_names("素材", "素材"), Ordering::Equal);
 }
+
+/// 検索が終わるまで待って、見つかった相対パスを返す。
+fn search(root: &std::path::Path, text: &str, recursive: bool) -> Vec<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let query = filer_core::SearchQuery::new(text, recursive);
+    let _job = filer_shell::start_search(root.to_path_buf(), query, move |event| {
+        let _ = tx.send(event);
+    });
+    let mut names = Vec::new();
+    while let Ok(event) = rx.recv() {
+        match event {
+            filer_shell::ListEvent::Batch(batch) => {
+                names.extend(batch.iter().map(|entry| entry.os_name().to_string_lossy().into_owned()));
+            }
+            _ => break,
+        }
+    }
+    names.sort();
+    names
+}
+
+#[test]
+fn search_finds_names_in_subfolders() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("a").join("目標フォルダ")).unwrap();
+    std::fs::write(dir.path().join("目標.txt"), "x").unwrap();
+    std::fs::write(dir.path().join("a").join("目標.txt"), "x").unwrap();
+    std::fs::write(dir.path().join("a").join("別.txt"), "x").unwrap();
+    assert_eq!(search(dir.path(), "目標", true), [r"a\目標.txt", r"a\目標フォルダ", "目標.txt"]);
+    assert_eq!(search(dir.path(), "目標", false), ["目標.txt"]);
+}
