@@ -4,6 +4,7 @@
 /// アプリの操作。入力の種類には依存しない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    QuickLook,
     Parent,
     Back,
     Forward,
@@ -81,6 +82,7 @@ impl Default for Bindings {
     fn default() -> Self {
         use Command::*;
         const KEYS: &[(&str, bool, bool, bool, Command)] = &[
+            ("space", false, false, false, QuickLook),
             ("up", false, false, true, Parent),
             ("left", false, false, true, Back),
             ("right", false, false, true, Forward),
@@ -172,6 +174,14 @@ mod tests {
     fn only_tab_commands_work_while_typing() {
         assert!(Command::CloseTab.works_while_typing());
         assert!(!Command::Paste.works_while_typing());
+    }
+
+    #[test]
+    fn space_opens_quick_look_only_outside_typing() {
+        let bindings = Bindings::default();
+        assert_eq!(bindings.key(&Chord::new("space", false, false, false)), Some(Command::QuickLook));
+        assert!(!Command::QuickLook.works_while_typing());
+        assert!(!Command::QuickLook.repeats());
     }
 
     #[test]

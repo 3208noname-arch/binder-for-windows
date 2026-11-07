@@ -3,6 +3,7 @@
 mod context_menu;
 mod enumerate;
 mod icons;
+mod media;
 mod drag_wheel;
 mod ime;
 mod name_cmp;
@@ -19,6 +20,7 @@ pub use watch::{WatchJob, watch_folder};
 
 pub use enumerate::{FolderSize, ListEvent, ListJob, folder_size, long_path, should_flush, start_list, start_search};
 pub use icons::{drive_label, drives, favorites, init_thread, load_icon};
+pub use media::{Pdf, Picture, Player, PlayerOptions, PlayerStatus, decode_image, read_text_head, set_window_owner};
 pub use name_cmp::compare_names;
 pub use operations::{shortcut_folder, 
     Opened, Operation, Prompt, clipboard_files, inverse, open_target, resolve_shortcut, run_operation, run_recording_undo, set_clipboard_files, unique_folder_name, valid_file_name,

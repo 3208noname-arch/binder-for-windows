@@ -280,6 +280,9 @@ impl Render for SettingsView {
                 this.change(cx, |settings| settings.scrollbar = ScrollbarMode::Always);
             })))
             .child(Self::heading("アイコン表示"))
+            .child(Self::choice("hover-play", "動画と音声はマウスを乗せると再生する", settings.hover_play).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.hover_play = !settings.hover_play);
+            })))
             .child(Self::choice("long-scroll", "長い名前はマウスを乗せると流して見せる", settings.scroll_long_names).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.scroll_long_names = !settings.scroll_long_names);
             })))

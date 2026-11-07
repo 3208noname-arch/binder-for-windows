@@ -461,13 +461,17 @@ impl WindowsWindow {
         register_drag_drop(&this)?;
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.borrow_mut().border_offset.update(hwnd)?;
-        let placement = retrieve_window_placement(
+        let mut placement = retrieve_window_placement(
             hwnd,
             display,
             params.bounds,
             this.state.borrow().scale_factor,
             this.state.borrow().border_offset,
         )?;
+        // focus: false のウィンドウは、前面の窓からフォーカスを奪わずに出す
+        if !params.focus {
+            placement.showCmd = SW_SHOWNOACTIVATE.0 as u32;
+        }
         if params.show {
             unsafe { SetWindowPlacement(hwnd, &placement)? };
         } else {

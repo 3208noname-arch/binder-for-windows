@@ -7,6 +7,8 @@ use crate::empty_cache::EmptyCache;
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::list_tree::Flattened;
+use crate::media_view::{HoverSlot, MediaSurface};
+use crate::quick_look::QuickLook;
 use crate::size_cache::SizeCache;
 use crate::tabs::Tab;
 use crate::theme;
@@ -16,7 +18,7 @@ use filer_core::{
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
 use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
+    AnyElement, App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
     WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
@@ -123,6 +125,14 @@ pub struct Browser {
     pub icon_size_drag: Option<IconSizeDrag>,
     pub sidebar_scroll: ScrollHandle,
     pub hovered_cell: Option<PathBuf>,
+    pub hover_media: HoverSlot,
+    /// カラムのプレビュー欄の再生
+    pub panel_media: Option<Entity<MediaSurface>>,
+    pub quick_look: Option<WindowHandle<QuickLook>>,
+    /// クイックルックが見せている項目
+    pub quick_look_item: Option<PathBuf>,
+    /// 前回閉じた時のクイックルックの位置と大きさ
+    pub quick_look_bounds: Option<Bounds<Pixels>>,
     pub drive_labels: HashMap<PathBuf, String>,
     pub menu: Option<Menu>,
     pub window_active: bool,
@@ -229,6 +239,11 @@ impl Browser {
             icon_size_drag: None,
             sidebar_scroll: ScrollHandle::new(),
             hovered_cell: None,
+            hover_media: HoverSlot::default(),
+            panel_media: None,
+            quick_look: None,
+            quick_look_item: None,
+            quick_look_bounds: None,
             drive_labels: HashMap::new(),
             menu: None,
             window_active: true,
@@ -295,6 +310,28 @@ impl Browser {
             cx.notify();
         });
         self.save_settings(cx);
+    }
+
+    /// マウスオーバーの動画の消音を、次の再生にも残す。
+    pub fn set_hover_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
+        self.settings_model.update(cx, |model, cx| {
+            model.value.hover_muted = muted;
+            cx.notify();
+        });
+        self.save_settings(cx);
+    }
+
+    /// 開いている一覧から項目を探す。ディスクは読まない。
+    pub fn find_entry(&self, path: &Path, cx: &App) -> Option<Entry> {
+        let name = path.file_name()?;
+        let folder = path.parent()?;
+        let in_pane = |pane: &Entity<FolderPane>| {
+            let state = &pane.read(cx).state;
+            (state.path == folder).then(|| state.entries.iter().find(|entry| entry.os_name() == name).cloned()).flatten()
+        };
+        in_pane(&self.tab.pane)
+            .or_else(|| self.tab.expanded.iter().find_map(|(_, pane)| in_pane(pane)))
+            .or_else(|| self.tab.columns.iter().find_map(|column| in_pane(&column.pane)))
     }
 
     fn save_settings(&self, cx: &Context<Self>) {
@@ -995,7 +1032,7 @@ fn volume_of(path: &Path) -> String {
     path.components().next().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
-fn window_handle(window: &Window) -> isize {
+pub fn window_handle(window: &Window) -> isize {
     match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
         Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
         _ => 0,
@@ -1011,6 +1048,7 @@ impl Render for Browser {
         self.window_active = window.is_window_active();
         self.scale = window.scale_factor();
         self.viewport = window.viewport_size();
+        self.sync_media(window, cx);
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus);
         }

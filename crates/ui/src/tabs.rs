@@ -300,6 +300,7 @@ impl Browser {
         self.menu = None;
         self.spring = None;
         self.hovered_cell = None;
+        self.stop_media();
         self.suppress_click = false;
         self.grab_press = false;
         self.refocus = true;

@@ -3,15 +3,16 @@ use crate::icon_cache::{LARGE, SMALL};
 use crate::list_tree::{Flattened, Row};
 use crate::scrollbar::ScrollTarget;
 use crate::theme;
-use filer_core::{Entry, ViewMode, fit_width, format_size, kind_of};
+use filer_core::{Entry, PreviewKind, ViewMode, fit_width, format_size, kind_of, preview_kind};
 use filer_shell::format_time;
 use gpui::{
-    ClickEvent, Context, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, Point, Window, div,
-    prelude::*, px, rgb, uniform_list,
+    AnyElement, ClickEvent, Context, CursorStyle, ExternalPaths, Image, MouseButton, MouseDownEvent, Point, Window, div,
+    prelude::*, px, rgb, rgba, uniform_list,
 };
 use std::ffi::OsString;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::rc::Rc;
 
 /// 列の幅を範囲に収める。
@@ -397,6 +398,56 @@ impl Browser {
             .child(handle)
     }
 
+    /// プレビュー欄の絵。動画と音声には再生ボタンを重ね、押した後は同じ場所で再生する。
+    fn preview_media(&self, folder: &Path, entry: &Entry, icon: Option<Arc<Image>>, cx: &mut Context<Self>) -> AnyElement {
+        let kind = preview_kind(&entry.name, entry.is_dir);
+        let picture = self.item_icon(entry, icon, theme::PREVIEW_ICON);
+        if !kind.is_media() {
+            return picture;
+        }
+        let width = theme::PREVIEW_WIDTH - theme::PREVIEW_PADDING * 2.;
+        if let Some(surface) = self.panel_media.clone() {
+            let audio = kind == PreviewKind::Audio;
+            let stage = surface.read(cx).aspect().map_or(theme::PREVIEW_ICON, |aspect| width * aspect);
+            let failed = surface.read(cx).failed();
+            let height = if audio || failed { theme::PREVIEW_CONTROLS } else { stage + theme::PREVIEW_CONTROLS };
+            return div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .w(px(width))
+                .when(audio || failed, |column| column.child(picture))
+                .child(div().w(px(width)).h(px(height)).child(surface))
+                .into_any_element();
+        }
+        let path = folder.join(entry.os_name());
+        div()
+            .relative()
+            .flex_none()
+            .child(picture)
+            .child(
+                div().absolute().top_0().bottom_0().left_0().right_0().flex().items_center().justify_center().child(
+                    div()
+                        .id("preview-play")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(44.))
+                        .rounded_full()
+                        .bg(rgba(0x0000_0099))
+                        .hover(|button| button.bg(rgba(0x0000_00cc)))
+                        .text_color(rgb(0xffffff))
+                        .font_family("Segoe MDL2 Assets")
+                        .text_size(px(18.))
+                        .child("\u{E768}")
+                        .on_click(cx.listener(move |this, _, window, cx| this.play_in_panel(path.clone(), kind, window, cx))),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn preview_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let (folder, entry) = self.tab.preview.as_ref()?;
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, LARGE));
@@ -419,7 +470,7 @@ impl Browser {
                 .p_4()
                 .w(px(theme::PREVIEW_WIDTH))
                 .h_full()
-                .child(self.item_icon(entry, icon, theme::PREVIEW_ICON))
+                .child(self.preview_media(folder, entry, icon, cx))
                 .child(div().w_full().text_center().overflow_hidden().child(entry.name.clone()))
                 .child(line("種類", kind_of(entry)))
                 .child(line("サイズ", format_size(entry.size)))

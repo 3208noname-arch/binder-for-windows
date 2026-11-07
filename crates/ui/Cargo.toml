@@ -13,6 +13,7 @@ filer-shell.workspace = true
 filer-store.workspace = true
 futures = "0.3"
 gpui.workspace = true
+image = { version = "0.25", default-features = false }
 raw-window-handle = "0.6"
 unicode-segmentation = "1"
 windows.workspace = true

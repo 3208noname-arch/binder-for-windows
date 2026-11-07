@@ -72,6 +72,12 @@ pub const MARQUEE_PAUSE: f32 = 0.5;
 pub const PREVIEW_WIDTH: f32 = 260.0;
 pub const ROW_ICON: f32 = 16.0;
 pub const PREVIEW_ICON: f32 = 128.0;
+/// プレビュー欄の内側の余白
+pub const PREVIEW_PADDING: f32 = 16.0;
+/// プレビュー欄の再生の操作の高さ
+pub const PREVIEW_CONTROLS: f32 = 32.0;
+pub const QUICK_LOOK_WIDTH: f32 = 800.0;
+pub const QUICK_LOOK_HEIGHT: f32 = 560.0;
 pub const INDENT: f32 = 18.0;
 pub const DISCLOSURE_WIDTH: f32 = 14.0;
 pub const GROUP_MENU_WIDTH: f32 = 220.0;

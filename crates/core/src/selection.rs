@@ -14,6 +14,10 @@ impl Selection {
     pub fn contains(&self, path: &Path) -> bool {
         self.items.contains(path)
     }
+    /// 最後に動かした項目。
+    pub fn cursor(&self) -> Option<&Path> {
+        self.cursor.as_deref()
+    }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

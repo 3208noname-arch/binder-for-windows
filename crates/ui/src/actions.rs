@@ -1070,6 +1070,15 @@ impl Browser {
         self.tab.selection.harden();
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
+        // 一覧にページ送りの操作は無いので、開いている間はクイックルックへ渡す
+        let page = match keystroke.key.as_str() {
+            "pageup" => -1,
+            "pagedown" => 1,
+            _ => 0,
+        };
+        if page != 0 && self.quick_look_page(page, cx) {
+            return;
+        }
         let chord = Chord::new(&keystroke.key, modifiers.control, modifiers.shift, modifiers.alt);
         let Some(command) = self.bindings.key(&chord) else { return };
         let typing = self.tab.renaming.is_some()
@@ -1079,6 +1088,7 @@ impl Browser {
         if (typing && !command.works_while_typing()) || (event.is_held && !command.repeats()) {
             return;
         }
+        self.block_hover();
         if self.run_command(command, window, cx) {
             cx.stop_propagation();
         }
@@ -1089,6 +1099,7 @@ impl Browser {
         let mode = self.tab.view.mode;
         let rows = if mode == ViewMode::Icons { self.tab.grid_per_row as isize } else { 1 };
         match command {
+            Command::QuickLook => return self.toggle_quick_look(window, cx),
             Command::Parent => self.parent(cx),
             Command::Back => self.back(cx),
             Command::Forward => self.forward(cx),

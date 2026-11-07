@@ -42,6 +42,10 @@ pub struct AppSettings {
     pub spring_column_ms: u64,
     /// アイコン表示の長い名前を、マウスを乗せた間に流して見せる
     pub scroll_long_names: bool,
+    /// アイコン表示の動画と音声を、マウスを乗せると再生する
+    pub hover_play: bool,
+    /// マウスオーバーの動画を消音で始める
+    pub hover_muted: bool,
     pub scrollbar: ScrollbarMode,
     /// 隠し属性の項目も一覧に出す
     pub show_hidden: bool,
@@ -119,6 +123,8 @@ impl Default for AppSettings {
             spring_icons_ms: 1000,
             spring_column_ms: 500,
             scroll_long_names: true,
+            hover_play: true,
+            hover_muted: true,
             scrollbar: ScrollbarMode::WhileScrolling,
             show_hidden: false,
             focus_new_tabs: false,
@@ -463,6 +469,8 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(text).unwrap();
         assert_eq!(settings.spring_first_ms, 700);
         assert!(settings.scroll_long_names);
+        assert!(settings.hover_play);
+        assert!(settings.hover_muted);
     }
 
     #[test]
