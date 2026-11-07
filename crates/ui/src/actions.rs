@@ -1,7 +1,7 @@
 //! 選択、キー操作、ファイル操作など、画面の表示以外の動作。
 
 use crate::browser::Browser;
-use crate::icons_view::{GridRow, grid_metrics};
+use crate::icons_view::{GridRow, grid_item_rects, grid_metrics};
 use crate::list_tree::{Flattened, Row, group_range};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
@@ -11,7 +11,7 @@ use filer_shell::{
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    AnyElement, Bounds, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 use std::collections::{HashMap, HashSet};
@@ -49,6 +49,8 @@ pub enum SpringTarget {
 /// ドラッグ中に止まっている先。時間が来たら開く。
 pub struct Spring {
     target: SpringTarget,
+    /// 同じ行き先の部品が他にもあるので、どの部品の上かで見分ける
+    bounds: Bounds<Pixels>,
     _task: Task<()>,
 }
 
@@ -214,9 +216,9 @@ impl Browser {
         }
     }
 
-    /// ファイルを掴める範囲。アイコンと名前に付ける。カーソルで範囲選択の場所と見分ける。
+    /// ファイルを掴める範囲。Finderと同じく、リストとアイコンではアイコンと名前の文字だけ。
     pub fn grab_zone(&self, zone: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
-        zone.cursor(CursorStyle::Arrow).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.grab_press = true))
+        zone.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.grab_press = true))
     }
 
     /// 項目の共通のマウス操作。押下の記録、右クリック、ドロップの受け入れ。
@@ -229,6 +231,7 @@ impl Browser {
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 let grabbed = std::mem::take(&mut this.grab_press);
+                this.press_grabbed = grabbed;
                 if this.renaming.as_ref().is_some_and(|renaming| renaming.path == press_path) {
                     return;
                 }
@@ -466,7 +469,7 @@ impl Browser {
     pub fn hover_target(&mut self, target: SpringTarget, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
         let covered = matches!(target, SpringTarget::Folder(_)) && self.over_drag_bar(position);
         let inside = bounds.contains(&position) && !covered;
-        let current = self.spring.as_ref().is_some_and(|spring| spring.target == target);
+        let current = self.spring.as_ref().is_some_and(|spring| spring.target == target && spring.bounds == bounds);
         if inside == current {
             return;
         }
@@ -480,7 +483,7 @@ impl Browser {
             cx.background_executor().timer(Duration::from_millis(delay)).await;
             let _ = this.update(cx, |browser, cx| browser.open_hovered(fired, cx));
         });
-        self.spring = Some(Spring { target, _task: task });
+        self.spring = Some(Spring { target, bounds, _task: task });
     }
 
     /// 開くまでの待ち時間。開き方ごとに設定できる。
@@ -581,6 +584,11 @@ impl Browser {
         self.scroll_with_band(column, current, view.bounds);
         let Some(view) = self.band_viewport(column) else { return true };
         let end = point(current.x - view.bounds.origin.x, current.y - view.bounds.origin.y - view.scroll);
+        // 押しただけでは何も選ばない
+        let moved: f32 = (end - start).magnitude() as f32;
+        if moved < theme::DRAG_THRESHOLD {
+            return true;
+        }
         let hits = match self.view.mode {
             ViewMode::Icons => self.grid_hits(start, end, cx),
             ViewMode::List | ViewMode::Columns => {
@@ -635,8 +643,8 @@ impl Browser {
                     if y < bottom && y + row_height > top {
                         for (index, &entry) in cells.iter().enumerate() {
                             let x = theme::GRID_SIDE_PADDING + index as f32 * (cell_width + theme::GRID_CELL_GAP);
-                            if x < right && x + cell_width > left
-                                && let Some(entry) = state.entries.get(entry as usize)
+                            if let Some(entry) = state.entries.get(entry as usize)
+                                && grid_item_rects(entry, self.view.icon_size, x, y).iter().any(|rect| rect.touches(left, top, right, bottom))
                             {
                                 hits.push(state.path.join(entry.os_name()));
                             }
@@ -680,7 +688,7 @@ impl Browser {
 
     /// ドラッグ中に下へ出す大きな帯。戻る先と上の階層へ、広い的で移動できる。
     pub fn drag_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let current = self.history.current().to_path_buf();
+        let current = self.current_folder(cx);
         let mut ancestors: Vec<PathBuf> = current.ancestors().skip(1).take(theme::DRAG_BAR_SEGMENTS).map(PathBuf::from).collect();
         ancestors.reverse();
         let back = self.history.can_go_back().then(|| Self::drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
@@ -717,6 +725,7 @@ impl Browser {
             .flex()
             .flex_1()
             .min_w_0()
+            .max_w(px(theme::DRAG_SEGMENT_MAX_WIDTH))
             .items_center()
             .justify_center()
             .h(px(theme::DRAG_BAR_HEIGHT - 12.))

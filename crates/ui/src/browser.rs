@@ -34,6 +34,12 @@ pub struct Column {
     pub bar: BarFade,
 }
 
+impl Column {
+    pub fn new(pane: Entity<FolderPane>, view: FolderView) -> Self {
+        Self { pane, scroll: UniformListScrollHandle::new(), selected: None, view, tree: None, bar: BarFade::default() }
+    }
+}
+
 /// 幅をドラッグで変えている最中の状態。
 #[derive(Clone, Copy)]
 pub enum Resize {
@@ -102,6 +108,8 @@ pub struct Browser {
     pub suppress_click: bool,
     /// 今の押下が `grab_zone` の上だった
     pub grab_press: bool,
+    /// 直近の押下が `grab_zone` の上だったか。セルの余白のクリックと見分ける
+    pub press_grabbed: bool,
     pub band_task: Option<Task<()>>,
     pub scale: f32,
     pub viewport: Size<Pixels>,
@@ -204,6 +212,7 @@ impl Browser {
             soft_selection: false,
             suppress_click: false,
             grab_press: false,
+            press_grabbed: false,
             band_task: None,
             scale: window.scale_factor(),
             viewport: window.viewport_size(),
@@ -230,7 +239,7 @@ impl Browser {
             favorites: favorites(),
             drives: drives(),
         };
-        browser.reset_columns();
+        browser.reset_columns(cx);
         browser.load_in_background(cx);
         browser
     }
@@ -340,17 +349,33 @@ impl Browser {
         FolderView::for_folder(saved_view(&self.store, path), self.view.mode)
     }
 
-    fn reset_columns(&mut self) {
-        self.columns = vec![Column {
-            pane: self.pane.clone(),
-            scroll: UniformListScrollHandle::new(),
-            selected: None,
-            view: self.view.clone(),
-            tree: None,
-            bar: BarFade::default(),
-        }];
-        self.active_column = 0;
-        self.column_anchor = None;
+    /// 列を作り直す。カラム表示では親の列も並べ、開いたフォルダを左端に寄せる。
+    fn reset_columns(&mut self, cx: &mut Context<Self>) {
+        let mut previous = std::mem::take(&mut self.columns);
+        let mut columns = Vec::new();
+        if self.view.mode == ViewMode::Columns {
+            let path = self.history.current().to_path_buf();
+            let mut chain: Vec<&Path> = path.ancestors().collect();
+            chain.reverse();
+            for pair in chain.windows(2) {
+                let (folder, child) = (pair[0], pair[1]);
+                let reused = previous.iter().position(|column| column.pane != self.pane && column.pane.read(cx).state.path == folder);
+                let mut column = match reused {
+                    Some(index) => previous.remove(index),
+                    None => {
+                        let view = self.view_of(folder);
+                        Column::new(self.new_pane(folder.to_path_buf(), view.order, view.needs_properties(), cx), view)
+                    }
+                };
+                column.selected = child.file_name().map(|name| name.to_os_string());
+                columns.push(column);
+            }
+        }
+        columns.push(Column::new(self.pane.clone(), self.view.clone()));
+        self.active_column = columns.len() - 1;
+        self.column_anchor = (self.active_column > 0).then_some(self.active_column);
+        self.columns_reveal = true;
+        self.columns = columns;
         self.preview = None;
     }
 
@@ -377,7 +402,7 @@ impl Browser {
             pane.set_wants_properties(wants, cx);
             pane.open(path, cx);
         });
-        self.reset_columns();
+        self.reset_columns(cx);
         cx.notify();
     }
 
@@ -400,21 +425,28 @@ impl Browser {
         if self.leave_pinned_column(cx) {
             return;
         }
-        if let Some(parent) = self.history.current().parent().map(PathBuf::from) {
+        if let Some(parent) = self.current_folder(cx).parent().map(PathBuf::from) {
             self.navigate(parent, cx);
         }
     }
 
+    /// 操作中の列が、履歴の現在地より深い列か。
+    fn in_child_column(&self) -> bool {
+        self.view.mode == ViewMode::Columns && self.columns[self.active_column].pane != self.pane
+    }
+
     /// 開いているフォルダの設定を変え、すぐ保存する。カラム表示では操作中の列が対象。
     pub fn update_view(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut FolderView)) {
-        let in_child_column = self.view.mode == ViewMode::Columns && self.active_column > 0;
+        let in_child_column = self.in_child_column();
         let (order, wants, pane) = if in_child_column {
             let column = &mut self.columns[self.active_column];
             change(&mut column.view);
             (column.view.order, column.view.needs_properties(), column.pane.clone())
         } else {
             change(&mut self.view);
-            self.columns[0].view = self.view.clone();
+            if let Some(column) = self.columns.iter_mut().find(|column| column.pane == self.pane) {
+                column.view = self.view.clone();
+            }
             (self.view.order, self.view.needs_properties(), self.pane.clone())
         };
         pane.update(cx, |pane, cx| {
@@ -433,8 +465,7 @@ impl Browser {
     /// 幅のドラッグの終わりなど、値を変えた後で保存する。
     pub fn save_active_view(&self, cx: &Context<Self>) {
         let Some(store) = &self.store else { return };
-        let in_child_column = self.view.mode == ViewMode::Columns && self.active_column > 0;
-        let result = if in_child_column {
+        let result = if self.in_child_column() {
             let column = &self.columns[self.active_column];
             store.save_folder_view(&column.pane.read(cx).state.path, &column.view)
         } else {
@@ -452,17 +483,22 @@ impl Browser {
         });
     }
 
+    /// 表示形式を変える。見ていたフォルダはそのまま引き継ぐ。
     fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        self.active_column = 0;
+        if mode == self.view.mode {
+            return;
+        }
+        let location = self.current_folder(cx);
+        if location != self.history.current() {
+            self.navigate(location, cx);
+        }
         self.update_view(cx, |view| view.mode = mode);
+        self.reset_columns(cx);
     }
 
     /// 並べ替えとグループの対象になっているフォルダの設定。
     fn active_view(&self) -> &FolderView {
-        match self.view.mode {
-            ViewMode::Columns if self.active_column > 0 => &self.columns[self.active_column].view,
-            _ => &self.view,
-        }
+        if self.in_child_column() { &self.columns[self.active_column].view } else { &self.view }
     }
 
     /// 選択の色。別のウィンドウへ移った時は灰色にする。
@@ -599,17 +635,18 @@ impl Browser {
             .justify_center()
             .w(px(theme::NAV_BUTTON_WIDTH))
             .h(px(theme::NAV_BUTTON_HEIGHT))
-            .rounded_md()
+            .rounded_full()
             .text_size(px(theme::NAV_GLYPH_SIZE))
             .line_height(px(theme::NAV_BUTTON_HEIGHT))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
-            .when(enabled, |b| b.cursor(CursorStyle::PointingHand).hover(|s| s.bg(rgb(theme::BACKGROUND))))
+            .when(enabled, |b| b.cursor(CursorStyle::PointingHand).hover(|s| s.bg(rgb(theme::HOVER))))
             .child(label)
     }
 
+    /// Finderと同じ、白い丸い枠にまとめたボタンの組。
     fn nav_group() -> gpui::Div {
-        div().flex().flex_none().items_center().gap_0p5().p_0p5().rounded_lg().bg(rgb(theme::SEGMENT))
+        div().flex().flex_none().items_center().gap_0p5().p_0p5().rounded_full().bg(rgb(theme::BACKGROUND)).border_1().border_color(rgb(theme::LINE))
     }
 
     fn segment(&self, id: &'static str, label: &'static str, mode: ViewMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -741,12 +778,12 @@ impl Browser {
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let current = self.history.current();
+        let current = self.current_folder(cx);
         let title = current.file_name().map_or_else(
             || current.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let pinned = self.view.mode == ViewMode::Columns && self.column_anchor.is_some();
+        let pinned = self.column_pinned();
         let (back, forward, up) = (self.history.can_go_back() || pinned, self.history.can_go_forward(), current.parent().is_some() || pinned);
         let parent_folder = current.parent().map(PathBuf::from);
         let active = self.active_view();
@@ -771,6 +808,7 @@ impl Browser {
                             },
                         ))
                     }))
+                    .child(div().flex_none().w(px(1.)).h(px(theme::NAV_DIVIDER_HEIGHT)).bg(rgb(theme::LINE)))
                     .child(Self::nav_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx))))),
             )
             .child(Self::nav_group().child(Self::nav_button("parent", "↑", up).when(up, |b| {

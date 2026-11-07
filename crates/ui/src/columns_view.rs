@@ -1,5 +1,4 @@
 use crate::browser::{Browser, Column, Resize};
-use crate::scrollbar::BarFade;
 use crate::icon_cache::{LARGE, SMALL};
 use crate::list_tree::{Flattened, Row};
 use crate::scrollbar::ScrollTarget;
@@ -7,7 +6,7 @@ use crate::theme;
 use filer_core::{Entry, ViewMode, fit_width, format_size, kind_of};
 use filer_shell::format_time;
 use gpui::{
-    ClickEvent, Context, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, Point, UniformListScrollHandle, Window, div,
+    ClickEvent, Context, CursorStyle, ExternalPaths, MouseButton, MouseDownEvent, Point, Window, div,
     prelude::*, px, rgb, uniform_list,
 };
 use std::ffi::OsString;
@@ -56,7 +55,7 @@ impl Browser {
         let width = clamp_column_width(width);
         if let Some(current) = self.columns.get_mut(column) {
             current.view.column_width = width;
-            if column == 0 {
+            if current.pane == self.pane {
                 self.view.column_width = width;
             }
             self.active_column = column;
@@ -105,9 +104,15 @@ impl Browser {
         true
     }
 
+    /// 履歴の現在地より深い列を、左端に寄せているか。
+    pub fn column_pinned(&self) -> bool {
+        let root = self.columns.iter().position(|column| column.pane == self.pane);
+        self.view.mode == ViewMode::Columns && self.column_anchor.is_some_and(|anchor| Some(anchor) > root)
+    }
+
     /// 左端に寄せた列を閉じて、1つ親の列へ戻る。寄せていなければ偽を返す。
     pub fn leave_pinned_column(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.view.mode != ViewMode::Columns {
+        if !self.column_pinned() {
             return false;
         }
         let Some(anchor) = self.column_anchor else { return false };
@@ -124,15 +129,21 @@ impl Browser {
     }
 
     /// 列の並びを描く前に、左端に寄せる余白と横の位置を決める。
-    fn align_columns(&mut self) -> f32 {
+    fn align_columns(&mut self, cx: &mut Context<Self>) -> f32 {
         self.column_anchor = self.column_anchor.filter(|&anchor| anchor < self.columns.len());
         let widths = self.columns.iter().map(|column| column.view.column_width);
         let preview = if self.preview.is_some() { theme::PREVIEW_WIDTH } else { 0. };
         let total = widths.clone().sum::<f32>() + preview;
         let left: f32 = widths.take(self.column_anchor.unwrap_or(0)).sum();
-        let (spacer, offset) = column_layout(left, total, self.columns_scroll.bounds().size.width.into());
-        if std::mem::take(&mut self.columns_reveal) {
-            self.columns_scroll.set_offset(Point::new(px(-offset), px(0.)));
+        let viewport: f32 = self.columns_scroll.bounds().size.width.into();
+        let (spacer, offset) = column_layout(left, total, viewport);
+        if self.columns_reveal {
+            // 最初の描画では幅が分からないので、次の描画に回す
+            if viewport > 0. {
+                self.columns_reveal = false;
+                self.columns_scroll.set_offset(Point::new(px(-offset), px(0.)));
+            }
+            cx.notify();
         }
         spacer
     }
@@ -164,7 +175,7 @@ impl Browser {
             self.preview = None;
             let view = self.view_of(&path);
             let pane = self.new_pane(path, view.order, view.needs_properties(), cx);
-            self.columns.push(Column { pane, scroll: UniformListScrollHandle::new(), selected: None, view, tree: None, bar: BarFade::default() });
+            self.columns.push(Column::new(pane, view));
             self.active_column = column + 1;
         } else {
             self.preview = Some((folder, entry));
@@ -228,7 +239,6 @@ impl Browser {
                     .when(renaming, |label| label.flex_1())
                     .child(icon)
                     .child(self.name_or_input(&path, &entry));
-                let label = self.grab_zone(label, cx);
                 let row = div()
                     .id(ix)
                     .when(self.is_dimmed(&path, &entry), |row| row.opacity(theme::CUT_OPACITY))
@@ -240,14 +250,14 @@ impl Browser {
                     .px_2()
                     .bg(rgb(background))
                     .text_color(rgb(if active { selected_text } else { theme::TEXT }))
-                    .cursor(CursorStyle::Crosshair)
                     .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
                     .child(label)
                     .child(div().flex_1())
                     .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")));
                 let click_path = path.clone();
                 Some(
-                    self.item_mouse(row, path, is_dir, Some(Some(column)), cx)
+                    // Finderのカラムは行全体を掴める。範囲選択は行の無い余白から
+                    self.item_mouse(row, path, is_dir, None, cx)
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_column_item(column, click_path.clone(), name.clone(), entry.clone(), event, window, cx)
                         }))
@@ -277,7 +287,7 @@ impl Browser {
                 .into_any_element()
             }
         };
-        let bar = self.scrollbar(Self::column_bar_id(column), ScrollTarget::Column(column), true, 0., cx);
+        let bar = self.scrollbar(("column-bar", column), ScrollTarget::Column(column), true, 0., cx);
         let handle = div()
             .id(("column-handle", column))
             .absolute()
@@ -306,7 +316,6 @@ impl Browser {
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::LINE))
-            .cursor(CursorStyle::Crosshair)
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
                 this.clear_column(column, cx);
@@ -358,7 +367,7 @@ impl Browser {
     }
 
     pub fn render_columns(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let spacer = self.align_columns();
+        let spacer = self.align_columns(cx);
         let columns: Vec<_> = (0..self.columns.len()).map(|i| self.column_list(i, cx)).collect();
         let preview = self.preview_panel(cx);
         let bar = self.scrollbar("columns-bar", ScrollTarget::Columns, false, 0., cx);
@@ -375,11 +384,5 @@ impl Browser {
         // 列の縦スクロールで、並び全体まで横に動かないようにする
         strip.style().restrict_scroll_to_axis = Some(true);
         div().relative().flex().flex_1().min_h_0().child(strip).children(bar)
-    }
-
-    /// 列ごとのスクロールバーの名前。列は多くならないので、固定の名前で足りる。
-    fn column_bar_id(column: usize) -> &'static str {
-        const IDS: [&str; 8] = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"];
-        IDS[column.min(IDS.len() - 1)]
     }
 }

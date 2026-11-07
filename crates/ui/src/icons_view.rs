@@ -4,9 +4,9 @@ use crate::scrollbar::ScrollTarget;
 use crate::list_tree::{Flattened, Row};
 use crate::theme;
 use crate::text_input::TextInput;
-use filer_core::{Date, Entry, GroupKey, MAX_ICON_SIZE, MIN_ICON_SIZE};
+use filer_core::{Date, Entry, GroupKey, MAX_ICON_SIZE, MIN_ICON_SIZE, text_width};
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, TextRun, Window, black,
+    Animation, AnimationExt, AnyElement, Context, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, TextRun, Window, black,
     deferred, div, font, linear_color_stop, linear_gradient, list, prelude::*, px, rgb,
 };
 use std::path::Path;
@@ -68,6 +68,19 @@ mod tests {
     use super::*;
     use crate::list_tree::TreeRow;
 
+    #[test]
+    fn band_touches_only_the_picture_and_the_name() {
+        let entry = Entry { name: "a.txt".into(), raw_name: None, is_dir: false, is_link: false, is_hidden: false, size: 0, modified: 0, created: 0 };
+        let rects = grid_item_rects(&entry, 96., 0., 0.);
+        let hit = |left, top, right, bottom| rects.iter().any(|rect| rect.touches(left, top, right, bottom));
+        // 絵の中央
+        assert!(hit(50., 50., 60., 60.));
+        // 1行の名前の下にあるセルの余白
+        assert!(!hit(0., 140., 112., 160.));
+        // 絵の左の余白
+        assert!(!hit(0., 40., 6., 60.));
+    }
+
     fn item(entry: u32) -> Row {
         Row::Item(TreeRow { depth: 0, folder: 0, entry })
     }
@@ -104,6 +117,38 @@ fn label_lines(name: &str, width: f32, window: &Window) -> f32 {
     lines.map_or(1, |lines| lines.iter().map(|line| line.wrap_boundaries.len() + 1).sum::<usize>()) as f32
 }
 
+/// 中身の座標の長方形。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Area {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl Area {
+    pub fn touches(&self, left: f32, top: f32, right: f32, bottom: f32) -> bool {
+        self.left < right && left < self.right && self.top < bottom && top < self.bottom
+    }
+}
+
+/// セルの中で実際に絵と文字がある範囲。範囲選択はここに触れた時だけ選ぶ。
+/// `x` と `y` はセルの左上。
+pub fn grid_item_rects(entry: &Entry, icon_size: f32, x: f32, y: f32) -> [Area; 2] {
+    let (cell_width, _) = grid_metrics(icon_size);
+    let center = x + cell_width / 2.;
+    let icon_top = y + theme::GRID_CELL_PADDING;
+    let label_top = icon_top + icon_size + theme::GRID_CELL_PADDING;
+    let width = theme::grid_label_width(icon_size);
+    let text = text_width(&entry.name, theme::SMALL_TEXT_SIZE);
+    let lines = (text / width).ceil().clamp(1., theme::GRID_LABEL_LINES);
+    let half = text.min(width) / 2.;
+    [
+        Area { left: center - icon_size / 2., top: icon_top, right: center + icon_size / 2., bottom: icon_top + icon_size },
+        Area { left: center - half, top: label_top, right: center + half, bottom: label_top + lines * theme::GRID_LABEL_LINE },
+    ]
+}
+
 /// 色やカーソルなど、名前の見せ方の材料。
 struct LabelLook {
     selected: bool,
@@ -125,7 +170,7 @@ impl Browser {
     }
 
     /// アイコンの下の名前。3行に収まらない分は薄く消し、設定によってマウスを乗せると流す。
-    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window) -> AnyElement {
+    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let width = theme::grid_label_width(self.view.icon_size);
         let lines = label_lines(&entry.name, width, window);
         if let Some(renaming) = self.renaming.as_ref().filter(|renaming| renaming.path == path) {
@@ -165,7 +210,7 @@ impl Browser {
             .w_full()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .line_height(px(line))
-            .child(label)
+            .child(self.grab_zone(label, cx))
             .into_any_element()
     }
 
@@ -189,7 +234,7 @@ impl Browser {
             _ => theme::BACKGROUND,
         };
         let look = LabelLook { selected, highlight, fill, text: selected_text };
-        let label = self.grid_label(ix, &path, entry, look, window);
+        let label = self.grid_label(ix, &path, entry, look, window, cx);
         let label_path = path.clone();
         let cell = div()
             .id(("cell", ix))
@@ -202,7 +247,6 @@ impl Browser {
             .p_1()
             .w(px(cell_width))
             .rounded_md()
-            .cursor(CursorStyle::Arrow)
             .when(!selected, |c| c.hover(|s| s.bg(rgb(theme::HOVER))))
             .when(filled, |c| c.bg(rgb(selected_background)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -215,11 +259,17 @@ impl Browser {
                     cx.notify();
                 }
             }))
-            .child(div().flex_none().rounded_md().when(highlight, |box_| box_.bg(rgb(theme::HOVER))).child(self.item_icon(entry, icon, size)))
+            .child(self.grab_zone(div().flex_none().rounded_md().when(highlight, |box_| box_.bg(rgb(theme::HOVER))).child(self.item_icon(entry, icon, size)), cx))
             .child(label);
         let click_path = path.clone();
-        self.item_mouse(cell, path, is_dir, None, cx)
-            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
+        self.item_mouse(cell, path, is_dir, Some(None), cx).on_click(cx.listener(move |this, event, window, cx| {
+            if this.press_grabbed {
+                this.click_item(click_path.clone(), is_dir, event, window, cx);
+            } else if !std::mem::take(&mut this.suppress_click) {
+                // セルの余白は、一覧の余白と同じに扱う
+                this.clear_selection(cx);
+            }
+        }))
     }
 
     fn grid_row(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -288,7 +338,6 @@ impl Browser {
             .relative()
             .flex_1()
             .min_h_0()
-            .cursor(CursorStyle::Crosshair)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if event.modifiers.control {
                     let notches = f32::from(event.delta.pixel_delta(px(theme::ROW_HEIGHT)).y).signum();

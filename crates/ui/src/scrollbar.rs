@@ -169,7 +169,7 @@ impl Browser {
     }
 
     /// つまみを描く。親の要素は `relative` で、`inset` はつまみの動く範囲の始まり。
-    pub fn scrollbar(&self, id: &'static str, target: ScrollTarget, vertical: bool, inset: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn scrollbar(&self, id: impl Into<gpui::ElementId>, target: ScrollTarget, vertical: bool, inset: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
         let opacity = self.bar_opacity(target);
         if opacity <= 0. {
             return None;
