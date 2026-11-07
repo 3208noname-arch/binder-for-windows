@@ -133,12 +133,21 @@ pub struct TextInput {
     shift: Pixels,
     /// 折り返す幅。無ければ1行で横に送る
     wrap: Option<f32>,
+    /// 周りに枠を持つ欄では、自前の線を引かない
+    plain: bool,
 }
 
 impl TextInput {
     /// `selected` の範囲を選んだ状態で作る。範囲はバイト単位。`wrap` は折り返す幅。
+    /// 枠を呼ぶ側で描く入力欄にする。
+    pub fn plain(mut self) -> Self {
+        self.plain = true;
+        self
+    }
+
     pub fn new(text: String, selected: Range<usize>, wrap: Option<f32>, cx: &mut Context<Self>) -> Self {
         Self {
+            plain: false,
             focus_handle: cx.focus_handle(),
             content: text.into(),
             selected_range: selected,
@@ -678,7 +687,10 @@ impl Render for TextInput {
                 div()
                     .when(self.wrap.is_none(), |field| field.h(px(20.)))
                     .w_full()
-                    .px(px(3.)).py(px(1.)).border_1().border_color(rgb(0x0a64d8)).rounded_sm().text_color(rgb(0x1f2023))
+                    .px(px(3.))
+                    .py(px(1.))
+                    .when(!self.plain, |field| field.border_1().border_color(rgb(theme::SELECTED)).rounded_sm())
+                    .text_color(rgb(theme::TEXT))
                     .bg(white())
                     .child(TextElement { input: cx.entity() }),
             )

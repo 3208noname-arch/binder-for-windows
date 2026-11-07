@@ -45,7 +45,7 @@ impl Browser {
             window.focus(&search.input.focus_handle(cx));
             return;
         }
-        let input = cx.new(|cx| TextInput::new(String::new(), 0..0, None, cx));
+        let input = cx.new(|cx| TextInput::new(String::new(), 0..0, None, cx).plain());
         let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
             InputEvent::Changed => this.run_search(cx),
             InputEvent::Submit => window.focus(&this.focus),
@@ -130,10 +130,10 @@ impl Browser {
         div()
             .id(id)
             .px_2()
-            .rounded_md()
+            .rounded(px(theme::SMALL_RADIUS))
             .cursor(CursorStyle::PointingHand)
-            .when(active, |chip| chip.bg(rgb(theme::SEGMENT)))
             .hover(|style| style.bg(rgb(theme::HOVER)))
+            .when(active, |chip| chip.bg(rgb(theme::SEGMENT)))
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(search) = &mut this.tab.search_box {

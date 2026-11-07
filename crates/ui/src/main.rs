@@ -13,6 +13,7 @@ mod list_state;
 mod list_tree;
 mod list_view;
 mod media_view;
+mod parts;
 mod path_bar;
 mod quick_look;
 mod scrollbar;
@@ -96,10 +97,11 @@ fn main() {
     let given = given_path();
     let restore = given.is_none();
     let path = start_path(given);
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(parts::Assets).run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(theme::WINDOW_MIN_WIDTH), px(theme::WINDOW_MIN_HEIGHT))),
             ..Default::default()
         };
         text_input::bind_keys(cx);

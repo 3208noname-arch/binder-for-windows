@@ -1,5 +1,6 @@
 use crate::actions::{Band, RowPress, Spring, SpringTarget};
 use crate::favorites::{FavoriteGap, FavoriteRename};
+use crate::parts::{self, Icon, control_cell, control_divider, control_group, icon, icon_cell, tip};
 use crate::path_bar::PathEdit;
 use crate::scrollbar::{BarFade, IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::settings_view::{SettingsModel, SettingsView};
@@ -20,9 +21,10 @@ use filer_store::Store;
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
+    WindowBounds, WindowHandle, WindowOptions, canvas, div, img, prelude::*, px, rgb, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -81,6 +83,9 @@ pub struct TreeKey {
 }
 
 /// ウィンドウ全体。履歴と表示の設定を持ち、3つの表示へ分ける。
+/// メニューを開くボタンの位置。描く時に覚える。
+type MenuAnchor = Rc<Cell<Bounds<Pixels>>>;
+
 pub struct Browser {
     /// 選んでいるタブ。一覧の見え方に関わる状態はここにある
     pub tab: Tab,
@@ -135,6 +140,8 @@ pub struct Browser {
     pub quick_look_bounds: Option<Bounds<Pixels>>,
     pub drive_labels: HashMap<PathBuf, String>,
     pub menu: Option<Menu>,
+    sort_anchor: MenuAnchor,
+    group_anchor: MenuAnchor,
     pub window_active: bool,
     pub icons: Entity<IconCache>,
     pub sizes: Entity<SizeCache>,
@@ -246,6 +253,8 @@ impl Browser {
             quick_look_bounds: None,
             drive_labels: HashMap::new(),
             menu: None,
+            sort_anchor: Rc::default(),
+            group_anchor: Rc::default(),
             window_active: true,
             icons,
             sizes,
@@ -297,6 +306,7 @@ impl Browser {
         let bounds = Bounds::centered(None, size(px(theme::SETTINGS_WINDOW_WIDTH), px(theme::SETTINGS_WINDOW_HEIGHT)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(theme::SETTINGS_MIN_WIDTH), px(theme::SETTINGS_MIN_HEIGHT))),
             titlebar: Some(TitlebarOptions { title: Some("設定".into()), ..Default::default() }),
             ..Default::default()
         };
@@ -659,10 +669,7 @@ impl Browser {
                     .bg(rgb(theme::BACKGROUND))
                     .border_1()
                     .border_color(rgb(theme::LINE))
-                    .text_size(px(badge * 0.8))
-                    .line_height(px(badge))
-                    .text_color(rgb(theme::SHORTCUT_ARROW))
-                    .child("↗"),
+                    .child(parts::icon(Icon::Shortcut, badge, theme::SHORTCUT_ARROW)),
             )
             .into_any_element()
     }
@@ -683,61 +690,29 @@ impl Browser {
         }
     }
 
-    fn tool_button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .px_2()
-            .rounded_md()
-            .text_color(rgb(if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
-            .when(enabled, |b| b.cursor(CursorStyle::PointingHand).hover(|s| s.bg(rgb(theme::HOVER))))
-            .child(label)
-    }
-
-    /// 戻る、進む、上へのボタン。よく使うので、狙いやすい大きさにする。
-    fn nav_button(id: &'static str, label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .w(px(theme::NAV_BUTTON_WIDTH))
-            .h(px(theme::NAV_BUTTON_HEIGHT))
-            .rounded_full()
-            .text_size(px(theme::NAV_GLYPH_SIZE))
-            .line_height(px(theme::NAV_BUTTON_HEIGHT))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
-            .when(enabled, |b| b.cursor(CursorStyle::PointingHand).hover(|s| s.bg(rgb(theme::HOVER))))
-            .child(label)
-    }
-
-    /// Finderと同じ、白い丸い枠にまとめたボタンの組。
-    fn nav_group() -> gpui::Div {
-        div().flex().flex_none().items_center().gap_0p5().p_0p5().rounded_full().bg(rgb(theme::BACKGROUND)).border_1().border_color(rgb(theme::LINE))
-    }
-
-    fn segment(&self, id: &'static str, label: &'static str, mode: ViewMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// 表示の切り替えの1区画。選んでいるものは地の色で示す。
+    fn segment(&self, id: &'static str, label: &'static str, kind: Icon, mode: ViewMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = self.tab.view.mode == mode;
-        div()
-            .id(id)
-            .px_2()
-            .rounded_sm()
-            .cursor(CursorStyle::PointingHand)
-            .when(active, |b| b.bg(rgb(theme::BACKGROUND)))
-            .child(label)
+        icon_cell(id, kind, true)
+            .tooltip(tip(label))
+            .when(active, |cell| cell.bg(rgb(theme::SEGMENT)))
             .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)))
     }
 
-    fn menu_button(&self, id: &'static str, label: String, menu: Menu, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        div()
-            .id(id)
-            .flex_none()
+    /// 開くメニューのある区画。位置を覚えて、メニューを真下に出す。
+    #[allow(clippy::too_many_arguments)]
+    fn menu_button(&self, id: &'static str, name: &'static str, kind: Icon, label: String, menu: Menu, anchor: &MenuAnchor, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let anchor = anchor.clone();
+        let wide = self.viewport.width >= px(theme::TOOLBAR_COMPACT_WIDTH);
+        control_cell(id, true)
+            .relative()
+            .gap_1()
             .px_2()
-            .rounded_md()
-            .cursor(CursorStyle::PointingHand)
-            .hover(|s| s.bg(rgb(theme::HOVER)))
-            .child(label)
+            .when(self.menu != Some(menu), |cell| cell.tooltip(tip(name)))
+            .child(canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {}).absolute().size_full())
+            .child(icon(kind, theme::CONTROL_ICON, theme::TEXT))
+            .when(wide, |cell| cell.child(label))
+            .child(icon(Icon::ChevronDown, theme::SMALL_ICON, theme::SUB_TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu = if this.menu == Some(menu) { None } else { Some(menu) };
@@ -749,7 +724,7 @@ impl Browser {
         position(div().absolute())
             .w(px(theme::GROUP_MENU_WIDTH))
             .py_1()
-            .rounded_md()
+            .rounded(px(theme::MENU_RADIUS))
             .bg(rgb(theme::BACKGROUND))
             .border_1()
             .border_color(rgb(theme::LINE))
@@ -763,12 +738,15 @@ impl Browser {
         div()
             .id(gpui::ElementId::Name(id.into()))
             .flex()
+            .items_center()
             .gap_2()
-            .px_3()
-            .py_0p5()
+            .mx_1()
+            .px_2()
+            .h(px(theme::MENU_ROW_HEIGHT))
+            .rounded(px(theme::SMALL_RADIUS))
             .cursor(CursorStyle::PointingHand)
             .hover(|s| s.bg(rgb(theme::HOVER)))
-            .child(div().w(px(12.)).child(if checked { "✓" } else { "" }))
+            .child(div().flex().flex_none().w(px(12.)).when(checked, |slot| slot.child(icon(Icon::Check, 12., theme::TEXT))))
             .child(label)
     }
 
@@ -785,7 +763,7 @@ impl Browser {
                     .into_any_element()
             })
             .collect();
-        items.push(div().my_1().h(px(1.)).bg(rgb(theme::LINE)).into_any_element());
+        items.push(div().my_1().mx_2().h(px(1.)).bg(rgb(theme::LINE)).into_any_element());
         for (id, label, descending) in [("asc", "昇順", false), ("desc", "降順", true)] {
             items.push(
                 Self::menu_item(id.into(), label.into(), order.descending == descending)
@@ -828,16 +806,21 @@ impl Browser {
     }
 
     fn open_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let top = px(theme::TOOLBAR_HEIGHT);
-        let shift = if self.tab.search_box.is_some() { theme::SEARCH_FIELD_WIDTH - theme::SEARCH_BUTTON_WIDTH } else { 0. };
+        let below = |anchor: &MenuAnchor| {
+            let bounds = anchor.get();
+            let left = bounds.left().min(self.viewport.width - px(theme::GROUP_MENU_WIDTH + theme::POPUP_MARGIN));
+            (left, bounds.bottom() + px(theme::POPUP_GAP))
+        };
         Some(match self.menu? {
             Menu::Sort => {
                 let items = self.sort_menu(cx);
-                Self::popup(|d| d.top(top).right(px(theme::MENU_RIGHT_SORT + shift)), items).into_any_element()
+                let (left, top) = below(&self.sort_anchor);
+                Self::popup(|d| d.left(left).top(top), items).into_any_element()
             }
             Menu::Group => {
                 let items = self.group_menu(cx);
-                Self::popup(|d| d.top(top).right(px(theme::GROUP_MENU_RIGHT + shift)), items).into_any_element()
+                let (left, top) = below(&self.group_anchor);
+                Self::popup(|d| d.left(left).top(top), items).into_any_element()
             }
             Menu::Fields(position) => {
                 let items = self.fields_menu(cx);
@@ -864,8 +847,8 @@ impl Browser {
         let parent_folder = current.parent().map(PathBuf::from);
         let (back_fill, parent_fill) = (self.drag_fill(&SpringTarget::Back), self.drag_fill(&SpringTarget::Parent));
         let active = self.active_view();
-        let sort = format!("並べ替え: {} ▾", active.order.key.label());
-        let group = format!("グループ: {} ▾", active.group.label());
+        let sort = active.order.key.label().to_string();
+        let group = active.group.label().to_string();
         div()
             .flex()
             .flex_none()
@@ -873,12 +856,13 @@ impl Browser {
             .gap_2()
             .h(px(theme::TOOLBAR_HEIGHT))
             .px_3()
+            .text_size(px(theme::SMALL_TEXT_SIZE))
             .bg(rgb(theme::BAR))
             .border_b_1()
             .border_color(rgb(theme::LINE))
             .child(
-                Self::nav_group()
-                    .child(Self::nav_button("back", "‹", back).when(back, |b| {
+                control_group()
+                    .child(icon_cell("back", Icon::Back, back).tooltip(tip("戻る")).when(back, |b| {
                         b.on_click(cx.listener(|this, _, _, cx| this.back(cx)))
                     .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, back_fill))
                     .on_drag_move::<ExternalPaths>(cx.listener(
@@ -887,10 +871,10 @@ impl Browser {
                             },
                         ))
                     }))
-                    .child(div().flex_none().w(px(1.)).h(px(theme::NAV_DIVIDER_HEIGHT)).bg(rgb(theme::LINE)))
-                    .child(Self::nav_button("forward", "›", forward).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx))))),
+                    .child(control_divider())
+                    .child(icon_cell("forward", Icon::Forward, forward).tooltip(tip("進む")).when(forward, |b| b.on_click(cx.listener(|this, _, _, cx| this.forward(cx))))),
             )
-            .child(Self::nav_group().child(Self::nav_button("parent", "↑", up).when(up, |b| {
+            .child(control_group().child(icon_cell("parent", Icon::Up, up).tooltip(tip("上の階層")).when(up, |b| {
                 let target = parent_folder.clone();
                 b.on_click(cx.listener(|this, _, _, cx| this.parent(cx)))
                     .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, parent_fill))
@@ -905,39 +889,57 @@ impl Browser {
                         }
                     }))
             })))
-            .child(div().flex_1().min_w_0().px_2().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
-            .child(self.menu_button("sort", sort, Menu::Sort, cx))
-            .child(self.menu_button("group", group, Menu::Group, cx))
+            .child(div().flex_1().min_w_0().px_2().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(theme::TEXT_SIZE)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .gap_1()
-                    .p_0p5()
-                    .rounded_md()
-                    .bg(rgb(theme::SEGMENT))
-                    .child(self.segment("mode-columns", "カラム", ViewMode::Columns, cx))
-                    .child(self.segment("mode-list", "リスト", ViewMode::List, cx))
-                    .child(self.segment("mode-icons", "アイコン", ViewMode::Icons, cx)),
+                control_group()
+                    .child(self.menu_button("sort", "並べ替え", Icon::Sort, sort, Menu::Sort, &self.sort_anchor, cx))
+                    .child(control_divider())
+                    .child(self.menu_button("group", "グループ", Icon::Group, group, Menu::Group, &self.group_anchor, cx)),
             )
             .child(
-                Self::tool_button("hidden", "隠し項目", true)
-                    .when(self.settings.show_hidden, |button| button.bg(rgb(theme::SEGMENT)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
+                control_group()
+                    .gap(px(theme::CONTROL_INSET))
+                    .child(self.segment("mode-columns", "カラム", Icon::Columns, ViewMode::Columns, cx))
+                    .child(self.segment("mode-list", "リスト", Icon::List, ViewMode::List, cx))
+                    .child(self.segment("mode-icons", "アイコン", Icon::Grid, ViewMode::Icons, cx)),
             )
-            .child(match &self.tab.search_box {
-                Some(search) => div().flex_none().w(px(theme::SEARCH_FIELD_WIDTH)).child(search.input.clone()).into_any_element(),
-                None => Self::tool_button("search", "検索", true)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)))
-                    .into_any_element(),
+            .child(
+                control_group()
+                    .gap(px(theme::CONTROL_INSET))
+                    .child(
+                        icon_cell("hidden", Icon::Eye, true)
+                            .tooltip(tip("隠し項目を表示"))
+                            .when(self.settings.show_hidden, |button| button.bg(rgb(theme::SEGMENT)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
+                    )
+                    .when(self.tab.search_box.is_none(), |group| {
+                        group.child(
+                            icon_cell("search", Icon::Search, true)
+                                .tooltip(tip("検索"))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx))),
+                        )
+                    })
+                    .child(
+                        icon_cell("settings", Icon::Gear, true)
+                            .tooltip(tip("設定"))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
+                    ),
+            )
+            .when_some(self.tab.search_box.as_ref(), |bar, search| {
+                bar.child(
+                    control_group()
+                        .flex_initial()
+                        .gap_1()
+                        .px_2()
+                        .w(px(theme::SEARCH_FIELD_WIDTH))
+                        .min_w(px(theme::SEARCH_FIELD_MIN_WIDTH))
+                        .child(icon(Icon::Search, theme::CONTROL_ICON, theme::SUB_TEXT))
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(search.input.clone())),
+                )
             })
-            .child(
-                Self::tool_button("settings", "設定", true)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx))),
-            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

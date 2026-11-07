@@ -3,6 +3,7 @@
 use crate::browser::{Browser, window_handle};
 use crate::icon_cache::{IconCache, LARGE};
 use crate::media_view::{MediaSurface, picture_image};
+use crate::parts::{Icon, icon};
 use crate::theme;
 use filer_core::{Entry, PreviewKind, Tree, build_tree, fit_window, format_size, kind_of, preview_kind, visible_lines};
 use filer_shell::{Pdf, compare_names, decode_image, fit_window_client, format_time, read_text_head, read_zip, set_window_owner, walk_folder};
@@ -328,17 +329,16 @@ impl QuickLook {
     }
 
     fn pdf_view(&self, image: Option<Arc<RenderImage>>, page: u32, pages: u32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let turn = |id: &'static str, label: &'static str, delta: i32, enabled: bool, cx: &mut Context<Self>| {
+        let turn = |id: &'static str, kind: Icon, delta: i32, enabled: bool, cx: &mut Context<Self>| {
             div()
                 .id(id)
                 .flex()
                 .items_center()
                 .justify_center()
                 .size(px(24.))
-                .rounded_sm()
+                .rounded(px(theme::SMALL_RADIUS))
                 .when(enabled, |button| button.hover(|button| button.bg(rgb(theme::HOVER))))
-                .text_color(rgb(if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
-                .child(label)
+                .child(icon(kind, 12., if enabled { theme::TEXT } else { theme::DISABLED_TEXT }))
                 .on_click(cx.listener(move |this, _, window, cx| this.turn_page(delta, window, cx)))
         };
         div()
@@ -357,9 +357,9 @@ impl QuickLook {
                     .gap_2()
                     .h(px(PAGE_BAR))
                     .text_size(px(theme::SMALL_TEXT_SIZE))
-                    .child(turn("pdf-previous", "‹", -1, page > 0, cx))
+                    .child(turn("pdf-previous", Icon::Back, -1, page > 0, cx))
                     .child(format!("{} / {}", page + 1, pages))
-                    .child(turn("pdf-next", "›", 1, page + 1 < pages, cx)),
+                    .child(turn("pdf-next", Icon::Forward, 1, page + 1 < pages, cx)),
             )
     }
 

@@ -1,6 +1,7 @@
 use crate::browser::{Browser, Column, Resize};
 use crate::icon_cache::{LARGE, SMALL};
 use crate::list_tree::{Flattened, Row};
+use crate::parts::{self, Icon};
 use crate::scrollbar::ScrollTarget;
 use crate::theme;
 use filer_core::{Entry, PreviewKind, ViewMode, fit_width, format_size, kind_of, preview_kind};
@@ -314,7 +315,7 @@ impl Browser {
                     .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
                     .child(label)
                     .child(div().flex_1())
-                    .when(is_dir && !empty, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")))
+                    .when(is_dir && !empty, |row| row.child(parts::icon(Icon::ChevronRight, theme::SMALL_ICON, if active { selected_text } else { theme::SUB_TEXT })))
                     .when(empty, |row| row.child(Self::empty_mark()));
                 let click_path = path.clone();
                 Some(

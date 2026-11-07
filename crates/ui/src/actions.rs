@@ -3,6 +3,7 @@
 use crate::browser::Browser;
 use crate::icons_view::{GridRow, grid_item_rects, grid_metrics};
 use crate::list_tree::{Flattened, Row, group_range};
+use crate::parts::{Icon, icon};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use filer_core::{Chord, Command, Entry, Gesture, ViewMode, is_favorite, rows_in_band};
@@ -884,14 +885,14 @@ impl Browser {
         let mut ancestors: Vec<PathBuf> = current.ancestors().skip(skipped).take(settings.drag_bar_folders as usize).map(PathBuf::from).collect();
         ancestors.reverse();
         let back = (settings.drag_bar_back && self.tab.history.can_go_back())
-            .then(|| self.drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
-        let up = parent.map(|parent| self.drag_segment("drag-up".into(), "↑ 上の階層".into(), SpringTarget::Parent, Some(parent), cx));
+            .then(|| self.drag_segment("drag-back".into(), Some(Icon::Back), "戻る".into(), SpringTarget::Back, None, cx));
+        let up = parent.map(|parent| self.drag_segment("drag-up".into(), Some(Icon::Up), "上の階層".into(), SpringTarget::Parent, Some(parent), cx));
         let segments: Vec<_> = ancestors
             .into_iter()
             .map(|path| {
                 let label = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
                 let id = format!("drag-go-{}", path.display());
-                self.drag_segment(id, label, SpringTarget::Go(path.clone()), Some(path), cx)
+                self.drag_segment(id, None, label, SpringTarget::Go(path.clone()), Some(path), cx)
             })
             .collect();
         div()
@@ -914,7 +915,7 @@ impl Browser {
             .children(segments)
     }
 
-    fn drag_segment(&self, id: String, label: String, target: SpringTarget, drop: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
+    fn drag_segment(&self, id: String, kind: Option<Icon>, label: String, target: SpringTarget, drop: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
         let fill = self.drag_fill(&target);
         div()
             .id(gpui::ElementId::Name(id.into()))
@@ -924,9 +925,10 @@ impl Browser {
             .max_w(px(theme::DRAG_SEGMENT_MAX_WIDTH))
             .items_center()
             .justify_center()
+            .gap_1()
             .h(px(theme::DRAG_BAR_HEIGHT - 12.))
             .px_3()
-            .rounded_md()
+            .rounded(px(theme::CONTROL_RADIUS))
             .bg(rgb(theme::BACKGROUND))
             .border_1()
             .border_color(rgb(theme::LINE))
@@ -934,6 +936,7 @@ impl Browser {
             .whitespace_nowrap()
             .text_ellipsis()
             .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, fill))
+            .children(kind.map(|kind| icon(kind, theme::CONTROL_ICON, theme::TEXT)))
             .child(label)
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 this.hover_target(target.clone(), event.bounds, event.event.position, cx);

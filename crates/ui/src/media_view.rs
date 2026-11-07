@@ -1,6 +1,7 @@
 //! 動画と音声の再生の面。アイコン表示のマウスオーバー、カラムのプレビュー欄、クイックルックで共用する。
 
 use crate::browser::{Browser, window_handle};
+use crate::parts::{Icon, icon};
 use crate::theme;
 use filer_core::{
     HOVER_DELAY_MS, HoverGate, PreviewKind, popup_size, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, ViewMode, format_media_time, fraction_at, preview_kind,
@@ -28,11 +29,6 @@ const TIME_SHOWN: Duration = Duration::from_millis(600);
 const CONTROLS_HEIGHT: f32 = 32.;
 /// ポップアップとウィンドウの端の間
 const POPUP_MARGIN: f32 = 8.;
-const GLYPH_FONT: &str = "Segoe MDL2 Assets";
-const GLYPH_PLAY: &str = "\u{E768}";
-const GLYPH_PAUSE: &str = "\u{E769}";
-const GLYPH_SOUND: &str = "\u{E767}";
-const GLYPH_MUTED: &str = "\u{E74F}";
 
 /// `Picture` を描ける画像にする。バイトの並びはBGRAのまま渡す。
 pub fn picture_image(picture: Picture) -> Option<Arc<RenderImage>> {
@@ -327,8 +323,8 @@ impl MediaSurface {
         !shown && !self.status.failed && !self.stopped && self.created.elapsed() >= Duration::from_millis(SPINNER_DELAY_MS)
     }
 
-    fn glyph(glyph: &'static str) -> gpui::Div {
-        div().flex().flex_none().items_center().justify_center().size(px(24.)).rounded_sm().font_family(GLYPH_FONT).text_size(px(13.)).child(glyph)
+    fn glyph(kind: Icon, color: u32) -> gpui::Div {
+        div().flex().flex_none().items_center().justify_center().size(px(24.)).rounded(px(theme::SMALL_RADIUS)).child(icon(kind, 14., color))
     }
 
     fn spinner() -> impl IntoElement {
@@ -356,7 +352,7 @@ impl MediaSurface {
         let progress = self.progress();
         let cursor = self.cursor;
         let mute = (!self.audio && shown).then(|| {
-            Self::glyph(if self.muted { GLYPH_MUTED } else { GLYPH_SOUND })
+            Self::glyph(if self.muted { Icon::Muted } else { Icon::Sound }, 0xffffff)
                 .id("media-mute")
                 .absolute()
                 .right(px(4.))
@@ -408,7 +404,7 @@ impl MediaSurface {
             .w_full()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .child(
-                Self::glyph(if self.status.paused { GLYPH_PLAY } else { GLYPH_PAUSE })
+                Self::glyph(if self.status.paused { Icon::Play } else { Icon::Pause }, theme::TEXT)
                     .id("media-play")
                     .hover(|button| button.bg(rgb(theme::HOVER)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx))),
@@ -435,7 +431,7 @@ impl MediaSurface {
             )
             .child(div().flex_none().text_color(rgb(theme::SUB_TEXT)).child(self.time_text()))
             .child(
-                Self::glyph(if self.muted { GLYPH_MUTED } else { GLYPH_SOUND })
+                Self::glyph(if self.muted { Icon::Muted } else { Icon::Sound }, theme::TEXT)
                     .id("media-mute")
                     .hover(|button| button.bg(rgb(theme::HOVER)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx))),

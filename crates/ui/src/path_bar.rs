@@ -25,7 +25,7 @@ impl Browser {
         }
         let text = self.current_folder(cx).display().to_string();
         let length = text.len();
-        let input = cx.new(|cx| TextInput::new(text, 0..length, None, cx));
+        let input = cx.new(|cx| TextInput::new(text, 0..length, None, cx).plain());
         let changed = cx.subscribe_in(&input, window, |this, _, event, _, cx| match event {
             InputEvent::Changed => {
                 this.tab.message = None;

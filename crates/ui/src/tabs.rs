@@ -5,6 +5,7 @@ use crate::browser::{Browser, Column, TreeKey, saved_view};
 use crate::folder_pane::FolderPane;
 use crate::icons_view::GridData;
 use crate::list_tree::Flattened;
+use crate::parts::{Icon, icon};
 use crate::scrollbar::{BarFade, ScrollTarget};
 use crate::search::{SearchBox, SearchRun};
 use crate::theme;
@@ -343,14 +344,15 @@ impl Browser {
         let (drag, drag_view) = self.favorite_drag(folder, title.clone(), cx);
         let close = div()
             .id(gpui::ElementId::Name(format!("tab-close-{id}").into()))
+            .flex()
             .flex_none()
-            .w(px(theme::TAB_CLOSE_WIDTH))
-            .text_center()
-            .rounded_sm()
-            .text_color(rgb(theme::SUB_TEXT))
+            .items_center()
+            .justify_center()
+            .size(px(theme::TAB_CLOSE_WIDTH))
+            .rounded(px(theme::SMALL_RADIUS))
             .cursor(CursorStyle::PointingHand)
             .hover(|style| style.bg(rgb(theme::HOVER)))
-            .child("×")
+            .child(icon(Icon::Close, theme::SMALL_ICON, theme::SUB_TEXT))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -427,7 +429,7 @@ impl Browser {
                     .h_full()
                     .cursor(CursorStyle::PointingHand)
                     .hover(|style| style.bg(rgb(theme::HOVER)))
-                    .child("+")
+                    .child(icon(Icon::Plus, 12., theme::SUB_TEXT))
                     .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
             )
     }

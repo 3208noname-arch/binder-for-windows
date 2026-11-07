@@ -1,12 +1,13 @@
 //! Finderのように細いスクロールバー。gpuiには標準の部品が無いので、位置だけを読んで描く。
 
 use crate::browser::Browser;
+use crate::parts::{Icon, icon, slider_track};
 use crate::theme;
 use filer_core::{MAX_ICON_SIZE, MIN_ICON_SIZE};
 use filer_core::{ScrollbarMode, ViewMode};
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, div, point,
-    prelude::*, px, rgba,
+    prelude::*, px, rgb, rgba,
 };
 use std::time::{Duration, Instant};
 
@@ -265,12 +266,17 @@ impl Browser {
     pub fn icon_size_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let size = self.tab.view.icon_size;
         let ratio = (size - MIN_ICON_SIZE) / (MAX_ICON_SIZE - MIN_ICON_SIZE);
-        let step = |id: &'static str, label: &'static str, delta: f32, cx: &mut Context<Self>| {
+        let step = |id: &'static str, kind: Icon, delta: f32, cx: &mut Context<Self>| {
             div()
                 .id(id)
-                .px_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(theme::ICON_STEP_SIZE))
+                .rounded(px(theme::SMALL_RADIUS))
                 .cursor(CursorStyle::PointingHand)
-                .child(label)
+                .hover(|style| style.bg(rgb(theme::HOVER)))
+                .child(icon(kind, 12., theme::SUB_TEXT))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let size = (this.tab.view.icon_size + delta).clamp(MIN_ICON_SIZE, MAX_ICON_SIZE);
                     this.update_view(cx, |view| view.icon_size = size);
@@ -281,24 +287,9 @@ impl Browser {
             .flex_none()
             .items_center()
             .gap_1()
-            .child(step("icon-smaller", "−", -theme::ICON_SIZE_STEP, cx))
+            .child(step("icon-smaller", Icon::Minus, -theme::ICON_SIZE_STEP, cx))
             .child(
-                div()
-                    .id("icon-size")
-                    .relative()
-                    .w(px(theme::ICON_SLIDER_WIDTH))
-                    .h(px(theme::STATUS_HEIGHT))
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .child(div().absolute().top(px(11.)).left_0().right_0().h(px(3.)).rounded_full().bg(rgba(theme::SCROLL_THUMB)))
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(7.))
-                            .left(px(ratio * (theme::ICON_SLIDER_WIDTH - 12.)))
-                            .size(px(12.))
-                            .rounded_full()
-                            .bg(rgba(theme::ICON_SLIDER_KNOB)),
-                    )
+                slider_track("icon-size", theme::ICON_SLIDER_WIDTH, theme::STATUS_HEIGHT, ratio)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -307,7 +298,7 @@ impl Browser {
                         }),
                     ),
             )
-            .child(step("icon-larger", "＋", theme::ICON_SIZE_STEP, cx))
+            .child(step("icon-larger", Icon::Plus, theme::ICON_SIZE_STEP, cx))
     }
 
     pub fn drag_icon_size(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {

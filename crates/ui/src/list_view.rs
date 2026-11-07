@@ -2,6 +2,7 @@ use crate::browser::{Browser, HeaderDrag, Menu, Resize, TreeKey};
 use crate::folder_pane::tree_for;
 use crate::icon_cache::SMALL;
 use crate::list_tree::{Flattened, Row};
+use crate::parts::{self, Icon};
 use crate::scrollbar::ScrollTarget;
 use crate::theme;
 use filer_core::{Entry, Field, fit_width, format_size, kind_of};
@@ -192,9 +193,9 @@ impl Browser {
         let column = self.tab.view.columns[index];
         let order = self.tab.view.order;
         let mark = match (column.field.sort_key() == Some(order.key), order.descending) {
-            (false, _) => "",
-            (true, false) => " ▲",
-            (true, true) => " ▼",
+            (false, _) => None,
+            (true, false) => Some(Icon::ChevronUp),
+            (true, true) => Some(Icon::ChevronDown),
         };
         let dropping = self.header_drag.is_some_and(|drag| drag.target == Some(index) && drag.index != index);
         let start_width = column.width;
@@ -230,7 +231,8 @@ impl Browser {
             .when(dropping, |cell| cell.bg(rgb(theme::HOVER)))
             .when(self.header_drag.is_some_and(|drag| drag.index == index), |cell| cell.bg(rgb(theme::SEGMENT)))
             .when(column.field == Field::Name, |cell| cell.pl(px(theme::DISCLOSURE_WIDTH + theme::ROW_ICON + theme::FIELD_GAP)))
-            .child(div().overflow_hidden().whitespace_nowrap().child(format!("{}{mark}", column.field.label())))
+            .child(div().overflow_hidden().whitespace_nowrap().child(column.field.label()))
+            .children(mark.map(|mark| parts::icon(mark, theme::SMALL_ICON, theme::SUB_TEXT)))
             .child(handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -257,13 +259,13 @@ impl Browser {
         let note = expanded.and_then(|pane| pane.read(cx).state.note());
         let expanded = expanded.is_some();
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
-        let slot = div().flex_none().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
+        let slot = div().flex().flex_none().items_center().justify_start().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
         let empty = self.is_empty_folder(path, entry, cx);
         let disclosure = if is_dir && !empty && self.tab.search_run.is_none() {
             let target = path.to_path_buf();
             slot.id(gpui::ElementId::Name(format!("open-{}", path.display()).into()))
                 .cursor(CursorStyle::PointingHand)
-                .child(if expanded { "▾" } else { "▸" })
+                .child(parts::icon(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, theme::SMALL_ICON, sub_text))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_expanded(target.clone(), cx);
