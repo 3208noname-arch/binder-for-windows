@@ -287,7 +287,10 @@ impl Browser {
         if let Some(column) = press.band_column {
             // 離した時の行のクリックで、選んだ範囲が消えないようにする
             self.suppress_click = true;
-            self.selection.clear();
+            match column {
+                Some(column) => self.clear_column(column, cx),
+                None => self.selection.clear(),
+            }
             self.begin_band(press.start, column, event.modifiers.control, cx);
             return;
         }

@@ -17,6 +17,7 @@ pub const FIELD_FIT_PADDING: f32 = 18.0;
 pub const FIELD_GAP: f32 = 8.0;
 pub const DRAG_THRESHOLD: f32 = 5.0;
 pub const GRAB_MIN_WIDTH: f32 = 160.0;
+pub const COLUMN_ROW_SPARE: f32 = 40.0;
 pub const MENU_RIGHT_SORT: f32 = 488.0;
 pub const CUT_OPACITY: f32 = 0.5;
 pub const SCROLL_WIDTH: f32 = 6.0;

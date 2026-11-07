@@ -74,7 +74,7 @@ impl Browser {
     }
 
     /// 列の余白を押した時は、その列の選択を解いて右の列を閉じる。
-    fn clear_column(&mut self, column: usize, cx: &mut Context<Self>) {
+    pub fn clear_column(&mut self, column: usize, cx: &mut Context<Self>) {
         if let Some(current) = self.columns.get_mut(column) {
             current.selected = None;
             self.selection.clear();
@@ -151,6 +151,9 @@ impl Browser {
     /// 列のクリック。Ctrl、Shiftは選択だけを変え、普通のクリックは列を開く。
     #[allow(clippy::too_many_arguments)]
     fn click_column_item(&mut self, column: usize, path: PathBuf, name: OsString, entry: Entry, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.suppress_click) {
+            return;
+        }
         self.active_column = column;
         let modifiers = event.modifiers();
         if modifiers.control || modifiers.shift {
@@ -259,6 +262,7 @@ impl Browser {
     fn column_rows(&mut self, column: usize, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(current) = self.columns.get(column) else { return Vec::new() };
         let selected = current.selected.clone();
+        let width = current.view.column_width;
         let pane = current.pane.clone();
         let (selected_background, selected_text) = self.selection_colors();
         let folder: PathBuf = pane.read(cx).state.path.clone();
@@ -288,10 +292,11 @@ impl Browser {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .min_w_0()
                     .when(renaming, |label| label.flex_1())
                     .child(icon)
                     .child(self.name_or_input(&path, &entry));
+                // 細い列でも「›」が押し出されないよう、掴める幅は列に収める
+                let label = self.grab_zone(label, cx).min_w(px(theme::GRAB_MIN_WIDTH.min(width - theme::COLUMN_ROW_SPARE)));
                 let row = div()
                     .id(ix)
                     .when(self.is_dimmed(&path, &entry), |row| row.opacity(theme::CUT_OPACITY))
@@ -303,15 +308,14 @@ impl Browser {
                     .px_2()
                     .bg(rgb(background))
                     .text_color(rgb(if active { selected_text } else { theme::TEXT }))
-                    .cursor(CursorStyle::Arrow)
+                    .cursor(CursorStyle::Crosshair)
                     .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
                     .child(label)
                     .child(div().flex_1())
                     .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")));
                 let click_path = path.clone();
                 Some(
-                    // カラムは行全体を掴める。範囲選択は行の無い余白から
-                    self.item_mouse(row, path, is_dir, None, cx)
+                    self.item_mouse(row, path, is_dir, Some(Some(column)), cx)
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_column_item(column, click_path.clone(), name.clone(), entry.clone(), event, window, cx)
                         }))
