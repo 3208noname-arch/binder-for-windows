@@ -7,6 +7,7 @@ mod drag_wheel;
 mod ime;
 mod name_cmp;
 mod operations;
+mod probe;
 mod properties;
 mod time;
 mod watch;
@@ -22,5 +23,6 @@ pub use name_cmp::compare_names;
 pub use operations::{shortcut_folder, 
     Opened, Operation, Prompt, clipboard_files, inverse, open_target, resolve_shortcut, run_operation, run_recording_undo, set_clipboard_files, unique_folder_name, valid_file_name,
 };
+pub use probe::{Probed, probe_path};
 pub use properties::{PropertiesJob, read_properties, start_properties};
 pub use time::{format_time, local_date, today};

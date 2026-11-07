@@ -2,8 +2,10 @@
 
 mod commands;
 mod entry;
+mod favorites;
 mod group;
 mod history;
+mod path_input;
 mod selection;
 mod sort;
 mod tabs;
@@ -11,8 +13,10 @@ mod view;
 
 pub use commands::{Bindings, Chord, Command, Gesture};
 pub use entry::{Entry, SearchQuery, format_size, kind_of};
+pub use favorites::{DropZone, Favorite, add_favorites, drop_zone, is_favorite, place_favorites, remove_favorite, rename_favorite};
 pub use group::{Date, Group, GroupKey, Properties, date_group, name_group, size_group, value_group};
 pub use history::History;
+pub use path_input::parse_path_input;
 pub use selection::Selection;
 pub use tabs::{SavedTab, TabList, TabSession};
 pub use view::{

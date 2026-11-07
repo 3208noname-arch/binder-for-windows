@@ -16,14 +16,16 @@ use windows::Win32::UI::Shell::{
     SHDRAGIMAGE, SHGetDesktopFolder, SHParseDisplayName, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetCursorPos, GetMenuItemCount, GetMenuItemID, GetSubMenu, HMENU, IDC_ARROW, LoadCursorW, SW_SHOWNORMAL, SetCursor, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    CreatePopupMenu, DestroyMenu, GetCursorPos, GetMenuItemCount, GetMenuItemID, GetSubMenu, HMENU, IDC_ARROW, InsertMenuW, LoadCursorW, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, SetCursor, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TrackPopupMenuEx, WM_SETCURSOR, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
 };
-use windows::core::{BOOL, GUID, HRESULT, HSTRING, Interface, PCSTR, PSTR, Result, implement, w};
+use windows::core::{BOOL, GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR, PSTR, Result, implement, w};
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK};
 
 const FIRST_COMMAND: u32 = 1;
 const LAST_COMMAND: u32 = 0x7fff;
+/// アプリが足す項目の番号。シェルの項目と重ならない。
+const EXTRA_COMMAND: u32 = LAST_COMMAND + 1;
 const CLSID_DRAG_DROP_HELPER: GUID = GUID::from_u128(0x4657278a_411b_11d2_839a_00c04fd918d0);
 
 fn to_hwnd(hwnd: isize) -> HWND {
@@ -107,6 +109,8 @@ pub enum MenuChoice {
     Rename,
     /// 「新規作成」の項目を実行した
     Created,
+    /// アプリが足した項目が選ばれた
+    Extra,
 }
 
 /// メニューの項目の内部名を読む。
@@ -133,10 +137,15 @@ fn in_new_menu(menu: &IContextMenu, popup: HMENU, command: u32) -> bool {
     }
 }
 
-fn track(hwnd: HWND, menu: &IContextMenu) -> Result<MenuChoice> {
+/// `extra` はメニューの先頭に足す、アプリの項目の文字。
+fn track(hwnd: HWND, menu: &IContextMenu, extra: Option<&str>) -> Result<MenuChoice> {
     unsafe {
         let popup = CreatePopupMenu()?;
         menu.QueryContextMenu(popup, 0, FIRST_COMMAND, LAST_COMMAND, CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME).ok()?;
+        if let Some(label) = extra {
+            InsertMenuW(popup, 0, MF_BYPOSITION | MF_STRING, EXTRA_COMMAND as usize, &HSTRING::from(label))?;
+            InsertMenuW(popup, 1, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null())?;
+        }
         let mut point = POINT::default();
         GetCursorPos(&mut point)?;
         let _ = SetForegroundWindow(hwnd);
@@ -146,8 +155,10 @@ fn track(hwnd: HWND, menu: &IContextMenu) -> Result<MenuChoice> {
         show_arrow();
         let command = TrackPopupMenuEx(popup, flags, point.x, point.y, hwnd, None).0 as u32;
         let _ = RemoveWindowSubclass(hwnd, Some(forward_menu_messages), 1);
-        let verb = (command >= FIRST_COMMAND).then(|| command_verb(menu, (command - FIRST_COMMAND) as usize)).flatten();
-        let invoked = if verb.as_deref() == Some("rename") {
+        let verb = (FIRST_COMMAND..=LAST_COMMAND).contains(&command).then(|| command_verb(menu, (command - FIRST_COMMAND) as usize)).flatten();
+        let invoked = if command == EXTRA_COMMAND {
+            Ok(MenuChoice::Extra)
+        } else if verb.as_deref() == Some("rename") {
             Ok(MenuChoice::Rename)
         } else if command >= FIRST_COMMAND {
             let info = CMINVOKECOMMANDINFO {
@@ -182,13 +193,13 @@ pub fn preload_items_menu(folder: &Path, names: &[OsString]) -> Result<()> {
 }
 
 /// 項目の右クリックメニューを出し、選ばれた項目を実行する。
-pub fn show_items_menu(hwnd: isize, folder: &Path, names: &[OsString]) -> Result<MenuChoice> {
+pub fn show_items_menu(hwnd: isize, folder: &Path, names: &[OsString], extra: Option<&str>) -> Result<MenuChoice> {
     let hwnd = to_hwnd(hwnd);
-    track(hwnd, &ui_object::<IContextMenu>(hwnd, folder, names)?)
+    track(hwnd, &ui_object::<IContextMenu>(hwnd, folder, names)?, extra)
 }
 
 /// フォルダの余白の右クリックメニュー（新規作成、貼り付けなど）を出す。
-pub fn show_folder_menu(hwnd: isize, folder: &Path) -> Result<MenuChoice> {
+pub fn show_folder_menu(hwnd: isize, folder: &Path, extra: Option<&str>) -> Result<MenuChoice> {
     let hwnd = to_hwnd(hwnd);
     let pidl = Pidl::parse(folder)?;
     let menu: IContextMenu = unsafe {
@@ -196,7 +207,7 @@ pub fn show_folder_menu(hwnd: isize, folder: &Path) -> Result<MenuChoice> {
         let shell_folder: IShellFolder = desktop.BindToObject(pidl.0, None)?;
         shell_folder.CreateViewObject(hwnd)?
     };
-    track(hwnd, &menu)
+    track(hwnd, &menu, extra)
 }
 
 #[implement(IDropSource)]

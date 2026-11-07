@@ -33,6 +33,8 @@ pub struct Tab {
     pub search_run: Option<SearchRun>,
     pub pending_rename: Option<PathBuf>,
     pub rename_request: Option<PathBuf>,
+    /// パス欄で開いたファイル。一覧の読み込みを待って選ぶ
+    pub pending_select: Option<PathBuf>,
     /// 右クリックの「新規作成」で増える項目を待っている
     pub new_items: Option<NewItems>,
     pub grid_per_row: usize,
@@ -69,6 +71,7 @@ impl Tab {
             search_run: None,
             pending_rename: None,
             rename_request: None,
+            pending_select: None,
             new_items: None,
             grid_per_row: 1,
             synced_version: 0,
@@ -284,6 +287,7 @@ impl Browser {
 
     /// 今のタブを離れる前に、ウィンドウが持つ途中の操作を片付ける。
     fn leave_tab(&mut self, cx: &mut Context<Self>) {
+        self.close_path_edit(true, cx);
         if self.tab.renaming.take().is_some() || self.tab.search_box.is_some() {
             remove_ime_caret();
         }

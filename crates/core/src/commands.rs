@@ -33,6 +33,7 @@ pub enum Command {
     NextTab,
     PreviousTab,
     OpenInNewTab,
+    EditPath,
 }
 
 impl Command {
@@ -44,7 +45,7 @@ impl Command {
 
     /// 名前の入力中や検索欄の中でも効くか。
     pub fn works_while_typing(self) -> bool {
-        matches!(self, Command::NewTab | Command::CloseTab | Command::NextTab | Command::PreviousTab)
+        matches!(self, Command::NewTab | Command::CloseTab | Command::NextTab | Command::PreviousTab | Command::EditPath)
     }
 }
 
@@ -107,6 +108,7 @@ impl Default for Bindings {
             // gpuiは記号を打つShiftを修飾から外すので、Shift+ピリオドは「>」で届く
             (">", true, false, false, ToggleHidden),
             (".", true, true, false, ToggleHidden),
+            ("l", true, false, false, EditPath),
             ("t", true, false, false, NewTab),
             ("w", true, false, false, CloseTab),
             ("tab", true, false, false, NextTab),

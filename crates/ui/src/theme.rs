@@ -78,6 +78,7 @@ pub const GROUP_MENU_RIGHT: f32 = 390.0;
 pub const SEARCH_FIELD_WIDTH: f32 = 200.0;
 pub const SEARCH_BUTTON_WIDTH: f32 = 42.0;
 pub const SEARCH_BAR_HEIGHT: f32 = 28.0;
+pub const FAVORITE_MENU_HEIGHT: f32 = 64.0;
 pub const NAV_BUTTON_WIDTH: f32 = 36.0;
 pub const NAV_BUTTON_HEIGHT: f32 = 28.0;
 pub const NAV_GLYPH_SIZE: f32 = 20.0;

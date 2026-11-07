@@ -1,4 +1,6 @@
 use crate::actions::{Band, RowPress, Spring, SpringTarget};
+use crate::favorites::{FavoriteGap, FavoriteRename};
+use crate::path_bar::PathEdit;
 use crate::scrollbar::{BarFade, IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::settings_view::{SettingsModel, SettingsView};
 use crate::empty_cache::EmptyCache;
@@ -9,7 +11,7 @@ use crate::size_cache::SizeCache;
 use crate::tabs::Tab;
 use crate::theme;
 use filer_core::{
-    AppSettings, Bindings, Date, Entry, Field, FolderView, Gesture, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
+    AppSettings, Bindings, Date, Entry, Favorite, Field, FolderView, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
@@ -61,6 +63,8 @@ pub enum Menu {
     Sort,
     Group,
     Fields(Point<Pixels>),
+    /// よく使う項目の行の右クリック
+    Favorite(usize, Point<Pixels>),
 }
 
 /// 行の並びが古くなっていないかを判断する材料。
@@ -123,7 +127,13 @@ pub struct Browser {
     pub window_active: bool,
     pub icons: Entity<IconCache>,
     pub sizes: Entity<SizeCache>,
-    favorites: Vec<(String, PathBuf)>,
+    pub favorites: Vec<Favorite>,
+    pub favorite_gap: Option<FavoriteGap>,
+    pub favorite_rename: Option<FavoriteRename>,
+    pub reordering_favorite: bool,
+    pub path_edit: Option<PathEdit>,
+    /// パス欄の確認の番号。古い結果を捨てるのに使う
+    pub path_request: u64,
     drives: Vec<PathBuf>,
 }
 
@@ -142,6 +152,9 @@ impl Browser {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let settings = store.as_ref().map(Store::app_settings).unwrap_or_default();
+        let favorites = store.as_ref().and_then(Store::favorites).unwrap_or_else(|| {
+            favorites().into_iter().map(|(name, path)| Favorite { name, path }).collect()
+        });
         let settings_model = cx.new(|_| SettingsModel { value: settings.clone() });
         cx.observe(&settings_model, |this, model, cx| {
             let settings = model.read(cx).value.clone();
@@ -220,7 +233,12 @@ impl Browser {
             window_active: true,
             icons,
             sizes,
-            favorites: favorites(),
+            favorites,
+            favorite_gap: None,
+            favorite_rename: None,
+            reordering_favorite: false,
+            path_edit: None,
+            path_request: 0,
             drives: drives(),
         };
         browser.restore_tabs(left, right, cx);
@@ -369,6 +387,7 @@ impl Browser {
 
     pub fn show(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.drop_search(cx);
+        self.close_path_edit(true, cx);
         self.tab.selection.clear();
         self.tab.message = None;
         self.menu = None;
@@ -678,7 +697,7 @@ impl Browser {
             .children(items)
     }
 
-    fn menu_item(id: String, label: String, checked: bool) -> gpui::Stateful<gpui::Div> {
+    pub fn menu_item(id: String, label: String, checked: bool) -> gpui::Stateful<gpui::Div> {
         div()
             .id(gpui::ElementId::Name(id.into()))
             .flex()
@@ -763,6 +782,11 @@ impl Browser {
                 // 右端で開いても切れないよう、ウィンドウの中へ収める
                 let left = position.x.min(self.viewport.width - px(theme::GROUP_MENU_WIDTH + theme::POPUP_MARGIN));
                 Self::popup(|d| d.left(left).top(position.y), items).into_any_element()
+            }
+            Menu::Favorite(row, position) => {
+                let items = self.favorite_menu(row, cx);
+                let top = position.y.min(self.viewport.height - px(theme::FAVORITE_MENU_HEIGHT + theme::POPUP_MARGIN));
+                Self::popup(|d| d.left(position.x).top(top), items).into_any_element()
             }
         })
     }
@@ -854,60 +878,16 @@ impl Browser {
             )
     }
 
-    fn sidebar_item(&self, id: String, label: String, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let active = self.tab.history.current() == path;
-        let fill = self.drag_fill(&SpringTarget::Go(path.clone()));
-        let (hover_path, drop_path, tab_path) = (path.clone(), path.clone(), path.clone());
-        div()
-            .id(gpui::ElementId::Name(id.into()))
-            .px_2()
-            .py_0p5()
-            .rounded_md()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .cursor(CursorStyle::PointingHand)
-            .when(active, |b| b.bg(rgb(theme::HOVER)))
-            .hover(|s| s.bg(rgb(theme::HOVER)))
-            .child(label)
-            .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, fill))
-            .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                this.hover_target(SpringTarget::Go(hover_path.clone()), event.bounds, event.event.position, cx);
-            }))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
-                cx.stop_propagation();
-                let copy = filer_shell::control_down();
-                this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
-            }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
-                this.item_gesture(Gesture::MiddleClick, tab_path.clone(), true, cx);
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| this.navigate(path.clone(), cx)))
-    }
-
-    fn sidebar_heading(label: &'static str) -> impl IntoElement {
-        div()
-            .px_2()
-            .pt_3()
-            .pb_1()
-            .text_size(px(theme::SMALL_TEXT_SIZE))
-            .text_color(rgb(theme::SUB_TEXT))
-            .child(label)
-    }
-
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let favorites: Vec<_> = self
-            .favorites
-            .iter()
-            .map(|(name, path)| self.sidebar_item(format!("fav-{name}"), name.clone(), path.clone(), cx))
-            .collect();
+        let favorites = self.favorite_rows(cx);
+        let (top, end) = (self.sidebar_heading("よく使う項目", 0, cx), self.sidebar_heading("場所", self.favorites.len(), cx));
         let drives: Vec<_> = self
             .drives
             .iter()
             .map(|drive| {
                 let short = drive.display().to_string().trim_end_matches('\\').to_string();
                 let label = self.drive_labels.get(drive).cloned().unwrap_or_else(|| short.clone());
-                self.sidebar_item(format!("drive-{short}"), label, drive.clone(), cx)
+                self.sidebar_item(format!("drive-{short}"), label.into_any_element(), drive.clone(), None, cx)
             })
             .collect();
         div()
@@ -923,14 +903,16 @@ impl Browser {
             .border_color(rgb(theme::LINE))
             .overflow_y_scroll()
             .track_scroll(&self.sidebar_scroll)
-            .child(Self::sidebar_heading("よく使う項目"))
+            .child(top)
             .children(favorites)
-            .child(Self::sidebar_heading("場所"))
+            .child(end)
             .children(drives)
     }
 
     fn status(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let icon_size = (self.tab.view.mode == ViewMode::Icons).then(|| self.icon_size_control(cx));
+        let path_field = self.path_field(cx);
+        let checking = self.path_status();
         let pane = self.tab.pane.read(cx);
         let state = &pane.state;
         let count = state.entries.len();
@@ -949,7 +931,9 @@ impl Browser {
             .text_color(rgb(theme::SUB_TEXT))
             .children(icon_size)
             .children(self.tab.message.clone().map(|message| div().flex_none().text_color(rgb(theme::ERROR_TEXT)).child(message)))
-            .child(div().flex_none().child(if state.loading {
+            .child(div().flex_none().child(if let Some(checking) = checking {
+                checking.to_string()
+            } else if state.loading {
                 let doing = if self.tab.search_run.is_some() { "検索中" } else { "読み込み中" };
                 format!("{doing}… {count} 項目")
             } else if pane.properties_loading() {
@@ -960,7 +944,7 @@ impl Browser {
                     selected => format!("{selected} / {count} 項目を選択"),
                 }
             }))
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(state.path.display().to_string()))
+            .child(path_field)
     }
 }
 
@@ -1015,11 +999,14 @@ impl Render for Browser {
         let status = self.status(cx);
         let menu = self.open_menu(cx);
         let band = self.band_view();
-        let dragging = cx.has_active_drag();
+        let dragging = self.dragging_items(cx);
         filer_shell::watch_wheel(dragging);
         if !dragging {
             self.end_spring();
             self.drag_tick = None;
+        }
+        if !cx.has_active_drag() {
+            self.clear_favorite_drag();
         }
         let drag_bar = dragging.then(|| self.drag_bar(cx));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);

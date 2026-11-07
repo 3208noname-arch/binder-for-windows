@@ -5,7 +5,7 @@ use crate::icons_view::{GridRow, grid_item_rects, grid_metrics};
 use crate::list_tree::{Flattened, Row, group_range};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use filer_core::{Chord, Command, Entry, Gesture, ViewMode, rows_in_band};
+use filer_core::{Chord, Command, Entry, Gesture, ViewMode, is_favorite, rows_in_band};
 use filer_shell::{
     MenuChoice, Opened, Operation, Prompt, clipboard_files, cursor_position, drag_items, init_thread, left_button_down, open_target, remove_ime_caret, run_recording_undo,
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
@@ -86,6 +86,8 @@ struct BandViewport {
 const BAND_TICK: Duration = Duration::from_millis(16);
 /// 「新規作成」の結果が一覧に現れるのを待つ時間
 const NEW_ITEM_WAIT: Duration = Duration::from_secs(5);
+/// 右クリックのメニューの先頭に足す項目。
+const ADD_FAVORITE: &str = "よく使う項目に追加";
 
 /// 2つのパスが同じドライブ（または共有）にあるか。
 fn same_volume(a: &Path, b: &Path) -> bool {
@@ -147,6 +149,24 @@ impl Browser {
         lists.flat_map(|state| state.entries.iter().map(|entry| state.path.join(entry.os_name()))).collect()
     }
 
+    /// 選択の中の、よく使う項目に無いフォルダ。
+    fn unregistered_folders(&self, cx: &Context<Self>) -> Vec<PathBuf> {
+        let selected: HashSet<PathBuf> = self.tab.selection.paths().iter().cloned().collect();
+        let columns = self.tab.columns.iter().map(|column| &column.pane);
+        let panes = std::iter::once(&self.tab.pane).chain(self.tab.expanded.values()).chain(columns);
+        let mut folders = Vec::new();
+        for pane in panes {
+            let state = &pane.read(cx).state;
+            for entry in state.entries.iter().filter(|entry| entry.is_dir) {
+                let path = state.path.join(entry.os_name());
+                if selected.contains(&path) && !folders.contains(&path) && !is_favorite(&self.favorites, &path) {
+                    folders.push(path);
+                }
+            }
+        }
+        folders
+    }
+
     /// 消えた項目や、閉じたフォルダの中の項目を選択から外す。
     /// 新規フォルダの一覧への反映を待って、名前の編集を始める。
     pub fn sync_with_listing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -165,6 +185,13 @@ impl Browser {
         if let Some(path) = self.tab.pending_rename.take_if(|path| known.contains(path)) {
             self.tab.selection.select_only(path.clone());
             self.begin_rename(path, window, cx);
+        }
+        // 隠し項目などで一覧に無ければ、選ばずに諦める
+        if let Some(path) = self.tab.pending_select.take().filter(|path| known.contains(path)) {
+            self.tab.selection.select_only(path.clone());
+            if let Some((row, _)) = self.visible_items(cx).iter().find(|(_, item)| *item == path) {
+                self.reveal(*row);
+            }
         }
     }
 
@@ -377,7 +404,7 @@ impl Browser {
     }
 
     /// 右クリックメニューを出す。「名前の変更」が選ばれたらアプリの入力欄を開く。
-    fn run_menu(cx: &mut Context<Self>, rename: Option<PathBuf>, created: Option<NewItems>, modal: impl FnOnce() -> Result<MenuChoice, windows::core::Error> + 'static) {
+    fn run_menu(cx: &mut Context<Self>, rename: Option<PathBuf>, created: Option<NewItems>, favorites: Vec<PathBuf>, modal: impl FnOnce() -> Result<MenuChoice, windows::core::Error> + 'static) {
         cx.spawn(async move |this, cx| {
             let choice = modal();
             let _ = this.update(cx, |browser, cx| {
@@ -388,6 +415,7 @@ impl Browser {
                         // 一覧が先に更新されていても、次の描画で探す
                         browser.tab.synced_version = 0;
                     }
+                    Ok(MenuChoice::Extra) => browser.add_favorites(favorites, cx),
                     Ok(_) => {}
                     Err(error) => eprintln!("メニューを出せませんでした: {error}"),
                 }
@@ -417,8 +445,10 @@ impl Browser {
         }
         let Some((folder, names)) = self.selection_in_folder_of(&path) else { return };
         let hwnd = self.hwnd;
+        let favorites = self.unregistered_folders(cx);
+        let extra = (!favorites.is_empty()).then_some(ADD_FAVORITE);
         cx.notify();
-        Self::run_menu(cx, Some(path), None, move || show_items_menu(hwnd, &folder, &names));
+        Self::run_menu(cx, Some(path), None, favorites, move || show_items_menu(hwnd, &folder, &names, extra));
     }
 
     /// 余白の右クリック。新規作成や貼り付けのメニュー。
@@ -432,7 +462,9 @@ impl Browser {
             .map(|column| column.pane.read(cx).state.entries.iter().map(|entry| entry.os_name().to_os_string()).collect())
             .unwrap_or_default();
         let created = NewItems { folder: folder.clone(), known, until: Instant::now() };
-        Self::run_menu(cx, None, Some(created), move || show_folder_menu(hwnd, &folder));
+        let favorites = if is_favorite(&self.favorites, &folder) { Vec::new() } else { vec![folder.clone()] };
+        let extra = (!favorites.is_empty()).then_some(ADD_FAVORITE);
+        Self::run_menu(cx, None, Some(created), favorites, move || show_folder_menu(hwnd, &folder, extra));
     }
 
     /// エクスプローラーと同じく、同じドライブなら移動、別なら複写にする。Ctrlは複写。
@@ -1040,7 +1072,10 @@ impl Browser {
         let modifiers = keystroke.modifiers;
         let chord = Chord::new(&keystroke.key, modifiers.control, modifiers.shift, modifiers.alt);
         let Some(command) = self.bindings.key(&chord) else { return };
-        let typing = self.tab.renaming.is_some() || self.tab.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window));
+        let typing = self.tab.renaming.is_some()
+            || self.favorite_rename.is_some()
+            || self.editing_path(window, cx)
+            || self.tab.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window));
         if (typing && !command.works_while_typing()) || (event.is_held && !command.repeats()) {
             return;
         }
@@ -1095,6 +1130,7 @@ impl Browser {
             Command::Undo => self.undo_last(cx),
             Command::NewFolder => self.new_folder(cx),
             Command::ToggleHidden => self.toggle_hidden(cx),
+            Command::EditPath => self.open_path_edit(window, cx),
             Command::NewTab => self.new_tab(window, cx),
             Command::CloseTab => self.close_tab(self.tabs.index(), window, cx),
             Command::NextTab => self.select_tab(self.tabs.neighbor(true), window, cx),

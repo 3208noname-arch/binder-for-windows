@@ -1,6 +1,6 @@
 //! 設定をSQLite 1ファイルへ保存する部品。
 
-use filer_core::{AppSettings, FolderView, TabSession};
+use filer_core::{AppSettings, Favorite, FolderView, TabSession};
 use std::path::Path;
 
 /// フォルダごとの表示の設定を持つ。
@@ -25,6 +25,10 @@ impl Store {
         )?;
         connection.execute(
             "CREATE TABLE IF NOT EXISTS tab_session (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)",
+            [],
+        )?;
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS favorites (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)",
             [],
         )?;
         Ok(Self { connection })
@@ -63,6 +67,23 @@ impl Store {
         Ok(())
     }
 
+    /// よく使う項目の並び。一度も変えていない時と、壊れていて読めない時は `None`。
+    /// 全部外した時は空の並びが返るので、既定の項目へは戻らない。
+    pub fn favorites(&self) -> Option<Vec<Favorite>> {
+        let text: String = self.connection.query_row("SELECT value FROM favorites WHERE id = 1", [], |row| row.get(0)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    pub fn save_favorites(&self, favorites: &[Favorite]) -> rusqlite::Result<()> {
+        let text = serde_json::to_string(favorites).expect("よく使う項目は必ず文字列にできる");
+        self.connection.execute(
+            "INSERT INTO favorites (id, value) VALUES (1, ?1)
+             ON CONFLICT (id) DO UPDATE SET value = excluded.value",
+            [text],
+        )?;
+        Ok(())
+    }
+
     /// 保存が無い時と、壊れていて読めない時は `None`。
     pub fn folder_view(&self, folder: &Path) -> Option<FolderView> {
         let text: String = self
@@ -92,6 +113,43 @@ fn key(folder: &Path) -> String {
 mod tests {
     use super::*;
     use filer_core::{GroupKey, SavedTab, ViewMode};
+
+    #[test]
+    fn favorites_come_back_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.sqlite");
+        let favorites = vec![
+            Favorite { name: "仕事".into(), path: r"\\nas\共有\素材".into() },
+            Favorite::new(r"C:\もう無いフォルダ".into()),
+        ];
+        Store::open(&file).unwrap().save_favorites(&favorites).unwrap();
+        assert_eq!(Store::open(&file).unwrap().favorites(), Some(favorites));
+    }
+
+    #[test]
+    fn an_emptied_favorites_list_stays_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("s.sqlite")).unwrap();
+        store.save_favorites(&[]).unwrap();
+        assert_eq!(store.favorites(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn missing_or_broken_favorites_are_treated_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("s.sqlite")).unwrap();
+        assert_eq!(store.favorites(), None);
+        store.connection.execute("INSERT INTO favorites VALUES (1, 'not json')", []).unwrap();
+        assert_eq!(store.favorites(), None);
+    }
+
+    #[test]
+    fn opening_an_old_file_adds_the_favorites_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.sqlite");
+        rusqlite::Connection::open(&file).unwrap().execute("CREATE TABLE app_settings (id INTEGER PRIMARY KEY, value TEXT)", []).unwrap();
+        assert_eq!(Store::open(&file).unwrap().favorites(), None);
+    }
 
     #[test]
     fn tab_session_comes_back_after_reopening() {
