@@ -240,15 +240,6 @@ impl Browser {
                     cx.notify();
                 }),
             )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    // 一覧の余白の右クリックメニューまで届かせない
-                    cx.stop_propagation();
-                    this.menu = Some(Menu::Fields(event.position));
-                    cx.notify();
-                }),
-            )
     }
 
     /// 名前の表示。編集中なら入力欄を出す。
@@ -329,22 +320,31 @@ impl Browser {
                 }
             })
             .collect();
+        let width = self.list_width();
         let row = div()
             .id(ix)
             .flex()
+            .flex_none()
             .items_center()
-            .w_full()
+            .w(px(width))
             .h(px(theme::ROW_HEIGHT))
             .px(px(theme::ROW_SIDE_PADDING))
             .gap(px(theme::FIELD_GAP))
-            .bg(rgb(background))
             .text_color(rgb(text))
             .cursor(CursorStyle::Crosshair)
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
             .children(cells);
         let click_path = path.clone();
-        self.item_mouse(row, path, is_dir, Some(None), cx)
-            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
+        let row = self
+            .item_mouse(row, path, is_dir, Some(None), cx)
+            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)));
+        // 列より右は色だけを続ける。押した時は一覧の余白として扱う
+        div().flex().w_full().h(px(theme::ROW_HEIGHT)).bg(rgb(background)).child(row)
+    }
+
+    /// 列の幅の合計。
+    fn list_width(&self) -> f32 {
+        self.tab.view.columns.iter().map(|c| c.width + theme::FIELD_GAP).sum::<f32>() + theme::ROW_SIDE_PADDING * 2.0
     }
 
     fn list_rows(&mut self, tree: &Flattened, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -365,7 +365,7 @@ impl Browser {
 
     pub fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cells: Vec<_> = (0..self.tab.view.columns.len()).map(|index| self.header_cell(index, cx)).collect();
-        let total: f32 = self.tab.view.columns.iter().map(|c| c.width + theme::FIELD_GAP).sum::<f32>() + theme::ROW_SIDE_PADDING * 2.0;
+        let total = self.list_width() + theme::LIST_TRAILING_SPACE;
         let header = div()
             .flex()
             .flex_none()
@@ -378,6 +378,15 @@ impl Browser {
             .border_b_1()
             .border_color(rgb(theme::LINE))
             .text_color(rgb(theme::SUB_TEXT))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    // 見出しの帯ではファイルのメニューを出さない
+                    cx.stop_propagation();
+                    this.menu = Some(Menu::Fields(event.position));
+                    cx.notify();
+                }),
+            )
             .children(cells);
         // 1回の描画で何度も呼ばれるので、行の並びは1回だけ作る
         let tree = self.tree(cx);
@@ -414,22 +423,6 @@ impl Browser {
                 ),
             );
         strip.style().restrict_scroll_to_axis = Some(true);
-        // 行が横幅いっぱいに並ぶので、選択を解除する場所を右端に残す
-        let clear_zone = div()
-            .id("list-clear")
-            .absolute()
-            .top(px(theme::ROW_HEIGHT))
-            .bottom_0()
-            .right(px(theme::SCROLL_MARGIN * 2. + theme::SCROLL_WIDTH))
-            .w(px(theme::CLEAR_ZONE_WIDTH))
-            .cursor(CursorStyle::Arrow)
-            .hover(|style| style.bg(rgb(theme::HOVER)))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.commit_rename(window, cx);
-                this.clear_selection(cx);
-            }));
-        div().relative().flex_1().min_h_0().flex().flex_col().child(strip).child(clear_zone).children(vertical_bar).children(horizontal_bar)
+        div().relative().flex_1().min_h_0().flex().flex_col().child(strip).children(vertical_bar).children(horizontal_bar)
     }
 }

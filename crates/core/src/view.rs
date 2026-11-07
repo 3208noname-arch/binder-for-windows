@@ -40,8 +40,28 @@ pub struct AppSettings {
     pub focus_new_tabs: bool,
     /// タブの帯の上のホイールでタブを切り替える
     pub wheel_switches_tabs: bool,
+    /// 新しいタブで開くフォルダ
+    pub new_tab_folder: NewTabFolder,
+    /// `NewTabFolder::Custom` で開くフォルダ
+    pub new_tab_path: String,
+    /// ドラッグ中の下の帯に「戻る」を出す
+    pub drag_bar_back: bool,
+    /// ドラッグ中の下の帯に「上の階層」を出す
+    pub drag_bar_parent: bool,
+    /// ドラッグ中の下の帯に並べる親フォルダの数
+    pub drag_bar_folders: u64,
     /// 移動やコピーの直前の点滅の間隔（ミリ秒）。0なら点滅しない
-    pub move_flash_ms: u64,
+    pub flash_interval_ms: u64,
+    /// 移動やコピーの直前に点滅する回数
+    pub flash_count: u64,
+}
+
+/// 新しいタブで開くフォルダ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NewTabFolder {
+    Home,
+    Current,
+    Custom,
 }
 
 /// スクロールバーの出し方。
@@ -57,6 +77,10 @@ pub const MIN_SPRING_MS: u64 = 100;
 pub const MAX_SPRING_MS: u64 = 3000;
 /// 点滅の間隔のスライダーの上限（ミリ秒）。
 pub const MAX_FLASH_MS: u64 = 300;
+/// 点滅の回数の上限。
+pub const MAX_FLASH_COUNT: u64 = 8;
+/// ドラッグ中の下の帯に並べる親フォルダの数の上限。
+pub const MAX_DRAG_BAR_FOLDERS: u64 = 8;
 const SPRING_STEP_MS: u64 = 100;
 
 /// スライダーの値を、範囲の中の100ミリ秒刻みへ丸める。
@@ -84,7 +108,13 @@ impl Default for AppSettings {
             show_hidden: false,
             focus_new_tabs: false,
             wheel_switches_tabs: true,
-            move_flash_ms: 70,
+            new_tab_folder: NewTabFolder::Home,
+            new_tab_path: String::new(),
+            drag_bar_back: true,
+            drag_bar_parent: true,
+            drag_bar_folders: 3,
+            flash_interval_ms: 120,
+            flash_count: 3,
         }
     }
 }

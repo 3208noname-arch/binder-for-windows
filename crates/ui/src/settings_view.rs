@@ -1,8 +1,11 @@
 //! 設定のウィンドウ。項目が増えても並べられるよう、本体とは別に開く。
 
 use crate::open_store;
+use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use filer_core::{AppSettings, MAX_FLASH_MS, MAX_SPRING_MS, MIN_SPRING_MS, ScrollbarMode, snap_flash_ms, snap_spring_ms};
+use filer_core::{
+    AppSettings, MAX_DRAG_BAR_FOLDERS, MAX_FLASH_COUNT, MAX_FLASH_MS, MAX_SPRING_MS, MIN_SPRING_MS, NewTabFolder, ScrollbarMode, snap_flash_ms, snap_spring_ms,
+};
 use filer_store::Store;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Stateful, Window, div, prelude::*,
@@ -22,21 +25,35 @@ enum Delay {
     Icons,
     Column,
     Flash,
+    FlashCount,
+    DragFolders,
 }
 
 impl Delay {
     fn range(self) -> (u64, u64) {
-        if self == Delay::Flash { (0, MAX_FLASH_MS) } else { (MIN_SPRING_MS, MAX_SPRING_MS) }
+        match self {
+            Delay::Flash => (0, MAX_FLASH_MS),
+            Delay::FlashCount => (1, MAX_FLASH_COUNT),
+            Delay::DragFolders => (0, MAX_DRAG_BAR_FOLDERS),
+            _ => (MIN_SPRING_MS, MAX_SPRING_MS),
+        }
     }
 
-    fn snap(self, ms: f32) -> u64 {
-        if self == Delay::Flash { snap_flash_ms(ms) } else { snap_spring_ms(ms) }
+    fn snap(self, value: f32) -> u64 {
+        let (low, high) = self.range();
+        match self {
+            Delay::Flash => snap_flash_ms(value),
+            Delay::FlashCount | Delay::DragFolders => (value.round().max(0.) as u64).clamp(low, high),
+            _ => snap_spring_ms(value),
+        }
     }
 
     fn label(self, ms: u64) -> String {
         match self {
             Delay::Flash if ms == 0 => "点滅しない".to_string(),
             Delay::Flash => format!("{ms} ミリ秒"),
+            Delay::FlashCount => format!("{ms} 回"),
+            Delay::DragFolders => format!("{ms} 個"),
             _ => format!("{:.1} 秒", ms as f32 / 1000.),
         }
     }
@@ -53,6 +70,7 @@ pub struct SettingsView {
     model: Entity<SettingsModel>,
     store: Option<Store>,
     drag: Option<SliderDrag>,
+    new_tab_path: Entity<TextInput>,
 }
 
 fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
@@ -62,14 +80,26 @@ fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
         Delay::List => &mut settings.spring_list_ms,
         Delay::Icons => &mut settings.spring_icons_ms,
         Delay::Column => &mut settings.spring_column_ms,
-        Delay::Flash => &mut settings.move_flash_ms,
+        Delay::Flash => &mut settings.flash_interval_ms,
+        Delay::FlashCount => &mut settings.flash_count,
+        Delay::DragFolders => &mut settings.drag_bar_folders,
     }
 }
 
 impl SettingsView {
     pub fn new(model: Entity<SettingsModel>, cx: &mut Context<Self>) -> Self {
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
-        Self { model, store: open_store(), drag: None }
+        let path = model.read(cx).value.new_tab_path.clone();
+        let length = path.len();
+        let new_tab_path = cx.new(|cx| TextInput::new(path, length..length, None, cx));
+        cx.subscribe(&new_tab_path, |this, input, event, cx| {
+            if matches!(event, InputEvent::Changed) {
+                let path = input.read(cx).text();
+                this.change(cx, |settings| settings.new_tab_path = path);
+            }
+        })
+        .detach();
+        Self { model, store: open_store(), drag: None, new_tab_path }
     }
 
     fn change(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut AppSettings)) {
@@ -204,6 +234,18 @@ impl Render for SettingsView {
             .child(self.slider("delay-first", "帯やサイドバー（最初）", Delay::OpenFirst, settings.spring_first_ms, cx))
             .child(self.slider("delay-next", "帯やサイドバー（2回目以降）", Delay::OpenNext, settings.spring_next_ms, cx))
             .child(Self::heading("タブ"))
+            .child(Self::choice("new-tab-home", "新しいタブはホームを開く", settings.new_tab_folder == NewTabFolder::Home).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.new_tab_folder = NewTabFolder::Home);
+            })))
+            .child(Self::choice("new-tab-current", "新しいタブは今のタブと同じフォルダを開く", settings.new_tab_folder == NewTabFolder::Current).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.new_tab_folder = NewTabFolder::Current);
+            })))
+            .child(Self::choice("new-tab-custom", "新しいタブは次のフォルダを開く", settings.new_tab_folder == NewTabFolder::Custom).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.new_tab_folder = NewTabFolder::Custom);
+            })))
+            .when(settings.new_tab_folder == NewTabFolder::Custom, |page| {
+                page.child(div().ml(px(22.)).px_1().rounded_sm().border_1().border_color(rgb(theme::LINE)).child(self.new_tab_path.clone()))
+            })
             .child(Self::choice("focus-new-tabs", "フォルダを新しいタブで開いたら、そのタブへ切り替える", settings.focus_new_tabs).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.focus_new_tabs = !settings.focus_new_tabs);
             })))
@@ -211,7 +253,16 @@ impl Render for SettingsView {
                 this.change(cx, |settings| settings.wheel_switches_tabs = !settings.wheel_switches_tabs);
             })))
             .child(Self::heading("ファイルの移動"))
-            .child(self.slider("flash-interval", "移動の直前の点滅の間隔", Delay::Flash, settings.move_flash_ms, cx))
+            .child(self.slider("flash-interval", "移動の直前の点滅の間隔", Delay::Flash, settings.flash_interval_ms, cx))
+            .child(self.slider("flash-count", "移動の直前に点滅する回数", Delay::FlashCount, settings.flash_count, cx))
+            .child(Self::heading("ドラッグ中の下の帯"))
+            .child(Self::choice("drag-parent", "「上の階層」を出す", settings.drag_bar_parent).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.drag_bar_parent = !settings.drag_bar_parent);
+            })))
+            .child(Self::choice("drag-back", "「戻る」を出す", settings.drag_bar_back).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.drag_bar_back = !settings.drag_bar_back);
+            })))
+            .child(self.slider("drag-folders", "並べる親フォルダの数", Delay::DragFolders, settings.drag_bar_folders, cx))
             .child(Self::heading("一覧"))
             .child(Self::choice("show-hidden", "隠し項目を表示する（Ctrl+Shift+.）", settings.show_hidden).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.show_hidden = !settings.show_hidden);

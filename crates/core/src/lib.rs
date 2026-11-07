@@ -16,8 +16,8 @@ pub use history::History;
 pub use selection::Selection;
 pub use tabs::{SavedTab, TabList, TabSession};
 pub use view::{
-    AppSettings, DEFAULT_COLUMN_WIDTH, DEFAULT_ICON_SIZE, Field, FolderView, ListColumn, MAX_FIELD_WIDTH,
-    MAX_FLASH_MS, MAX_ICON_SIZE, MAX_SPRING_MS, MIN_FIELD_WIDTH, MIN_ICON_SIZE, MIN_SPRING_MS, ScrollbarMode, ViewMode, fit_width, rows_in_band,
+    AppSettings, DEFAULT_COLUMN_WIDTH, DEFAULT_ICON_SIZE, Field, FolderView, ListColumn, NewTabFolder, MAX_FIELD_WIDTH,
+    MAX_DRAG_BAR_FOLDERS, MAX_FLASH_COUNT, MAX_FLASH_MS, MAX_ICON_SIZE, MAX_SPRING_MS, MIN_FIELD_WIDTH, MIN_ICON_SIZE, MIN_SPRING_MS, ScrollbarMode, ViewMode, fit_width, rows_in_band,
     snap_flash_ms, snap_spring_ms, text_width,
 };
 pub use sort::{NameCmp, SortKey, SortOrder, insert_sorted, sort_entries};

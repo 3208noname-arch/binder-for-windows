@@ -7,10 +7,14 @@ pub const ROW_HEIGHT: f32 = 24.0;
 pub const TOOLBAR_HEIGHT: f32 = 44.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
 pub const TAB_BAR_HEIGHT: f32 = 28.0;
-/// リストの右端の、押すと選択を解除する帯
-pub const CLEAR_ZONE_WIDTH: f32 = 28.0;
+/// 開いた小窓とウィンドウの端の間隔
+pub const POPUP_MARGIN: f32 = 8.0;
+/// リストの列の右に必ず残す余白。押すと選択を解除し、右クリックで新規作成ができる
+pub const LIST_TRAILING_SPACE: f32 = 64.0;
 /// 移動の直前に点滅する色
 pub const FLASH: u32 = 0xFFD76A;
+/// 一覧全体を点滅させる時の、半透明の同じ色
+pub const FLASH_TINT: u32 = 0xFFD76A66;
 /// ドラッグ中に端で止まった時に送る速さ（毎秒のピクセル）
 pub const DRAG_EDGE_SPEED: f32 = 480.0;
 /// ドラッグ中に端と見なす幅
@@ -62,7 +66,6 @@ pub const SCROLLBAR_LINGER_MS: u64 = 1200;
 pub const SCROLLBAR_FADE_IN_MS: u64 = 150;
 pub const SCROLLBAR_FADE_OUT_MS: u64 = 300;
 pub const DRAG_BAR_HEIGHT: f32 = 48.0;
-pub const DRAG_BAR_SEGMENTS: usize = 4;
 pub const DRAG_SEGMENT_MAX_WIDTH: f32 = 280.0;
 pub const GRID_LABEL_LINE: f32 = 16.0;
 pub const GRID_LABEL_LINES: f32 = 3.0;

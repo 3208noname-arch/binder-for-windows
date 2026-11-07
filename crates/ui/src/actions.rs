@@ -11,7 +11,7 @@ use filer_shell::{
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 use std::collections::{HashMap, HashSet};
@@ -287,7 +287,8 @@ impl Browser {
         let drop_color = self.drop_color(&path, cx);
         let flashing = self.flashing(&path);
         let (press_path, menu_path, tab_path, drop_path) = (path.clone(), path.clone(), path.clone(), path);
-        row.when(flashing, |row| row.bg(rgb(theme::FLASH)))
+        // カーソルが乗っている行き先でも光るよう、マウスを乗せた時の色も替える
+        row.when(flashing, |row| row.bg(rgb(theme::FLASH)).hover(|style| style.bg(rgb(theme::FLASH))))
             .on_mouse_down(
             MouseButton::Middle,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -457,19 +458,21 @@ impl Browser {
 
     /// 動く項目と行き先を点滅させてから実行する。
     fn flash_then_perform(&mut self, paths: HashSet<PathBuf>, operation: Operation, cx: &mut Context<Self>) {
-        let interval = Duration::from_millis(self.settings.move_flash_ms);
-        if interval.is_zero() {
+        let interval = Duration::from_millis(self.settings.flash_interval_ms);
+        let count = self.settings.flash_count;
+        if interval.is_zero() || count == 0 {
             self.perform(operation, true, cx);
             return;
         }
         self.flash = Some(Flash { paths, lit: true });
         cx.notify();
         cx.spawn(async move |this, cx| {
-            for lit in [false, true] {
+            // 光って消えるのを1回と数える
+            for step in 1..count * 2 {
                 cx.background_executor().timer(interval).await;
                 let _ = this.update(cx, |browser, cx| {
                     if let Some(flash) = &mut browser.flash {
-                        flash.lit = lit;
+                        flash.lit = step % 2 == 0;
                     }
                     cx.notify();
                 });
@@ -486,6 +489,11 @@ impl Browser {
     /// 今の描画で点滅の色を出す項目か。
     pub fn flashing(&self, path: &Path) -> bool {
         self.flash.as_ref().is_some_and(|flash| flash.lit && flash.paths.contains(path))
+    }
+
+    /// 開いている一覧そのものが行き先で、光らせる行が無い時に真。
+    pub fn flashing_view(&self, cx: &App) -> bool {
+        self.tab.columns.iter().any(|column| self.flashing(&column.pane.read(cx).state.path))
     }
 
     /// 見えている行のフォルダが空か。分かるまでは偽。
@@ -839,9 +847,15 @@ impl Browser {
     /// ドラッグ中に下へ出す大きな帯。戻る先と上の階層へ、広い的で移動できる。
     pub fn drag_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let current = self.current_folder(cx);
-        let mut ancestors: Vec<PathBuf> = current.ancestors().skip(1).take(theme::DRAG_BAR_SEGMENTS).map(PathBuf::from).collect();
+        let settings = &self.settings;
+        let parent = current.parent().map(PathBuf::from).filter(|_| settings.drag_bar_parent);
+        // 「上の階層」を出す時は、同じ行き先のフォルダを並べない
+        let skipped = 1 + usize::from(parent.is_some());
+        let mut ancestors: Vec<PathBuf> = current.ancestors().skip(skipped).take(settings.drag_bar_folders as usize).map(PathBuf::from).collect();
         ancestors.reverse();
-        let back = self.tab.history.can_go_back().then(|| Self::drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
+        let back = (settings.drag_bar_back && self.tab.history.can_go_back())
+            .then(|| Self::drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
+        let up = parent.map(|parent| Self::drag_segment("drag-up".into(), "↑ 上の階層".into(), SpringTarget::Parent, Some(parent), cx));
         let segments: Vec<_> = ancestors
             .into_iter()
             .map(|path| {
@@ -866,6 +880,7 @@ impl Browser {
             .shadow_md()
             .occlude()
             .children(back)
+            .children(up)
             .children(segments)
     }
 
@@ -905,8 +920,9 @@ impl Browser {
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some((items, cut)) = clipboard_files() else { return };
         let destination = self.current_folder(cx);
+        let flashed: HashSet<PathBuf> = items.iter().cloned().chain([destination.clone()]).collect();
         let operation = if cut { Operation::Move { items, destination } } else { Operation::Copy { items, destination } };
-        self.perform(operation, true, cx);
+        self.flash_then_perform(flashed, operation, cx);
     }
 
     fn recycle_selection(&mut self, cx: &mut Context<Self>) {

@@ -8,7 +8,7 @@ use crate::list_tree::Flattened;
 use crate::scrollbar::{BarFade, ScrollTarget};
 use crate::search::{SearchBox, SearchRun};
 use crate::theme;
-use filer_core::{Command, Entry, FolderView, Gesture, History, SavedTab, Selection, TabSession, ViewMode};
+use filer_core::{Command, Entry, FolderView, Gesture, History, NewTabFolder, SavedTab, Selection, TabSession, ViewMode};
 use filer_shell::{init_thread, remove_ime_caret, shortcut_folder};
 use gpui::{
     AnyElement, App, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, ListAlignment, ListState, MouseButton, ScrollHandle,
@@ -162,15 +162,25 @@ impl Browser {
         true
     }
 
-    /// 新しいタブを今のタブの右に開く。今と同じフォルダと表示形式で始める。
+    /// 新しいタブを今のタブの右に開く。表示形式は今のタブを引き継ぐ。
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
-        let (folder, mode) = (self.current_folder(cx), self.tab.mode());
+        let (folder, mode) = (self.new_tab_start(cx), self.tab.mode());
         let tab = self.make_tab(folder, mode, cx);
         self.leave_tab(cx);
         self.tabs.open_after(tab, &mut self.tab);
         self.load_tab(cx);
         cx.notify();
+    }
+
+    /// 新しいタブで開くフォルダ。指定が無い時はホームにする。
+    fn new_tab_start(&self, cx: &App) -> PathBuf {
+        let path = &self.settings.new_tab_path;
+        match self.settings.new_tab_folder {
+            NewTabFolder::Current => self.tab.folder(cx),
+            NewTabFolder::Custom if !path.trim().is_empty() => PathBuf::from(path.trim()),
+            _ => std::env::var_os("USERPROFILE").map_or_else(|| self.tab.folder(cx), PathBuf::from),
+        }
     }
 
     /// フォルダを裏のタブで開く。今のタブはそのまま。

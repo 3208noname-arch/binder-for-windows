@@ -16,7 +16,7 @@ use filer_store::Store;
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
     MouseButton, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
+    WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::{HashMap, HashSet};
@@ -763,7 +763,9 @@ impl Browser {
             }
             Menu::Fields(position) => {
                 let items = self.fields_menu(cx);
-                Self::popup(|d| d.left(position.x).top(position.y), items).into_any_element()
+                // 右端で開いても切れないよう、ウィンドウの中へ収める
+                let left = position.x.min(self.viewport.width - px(theme::GROUP_MENU_WIDTH + theme::POPUP_MARGIN));
+                Self::popup(|d| d.left(left).top(position.y), items).into_any_element()
             }
         })
     }
@@ -875,7 +877,7 @@ impl Browser {
                 let copy = filer_shell::control_down();
                 this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
             }))
-            .when(self.flashing(&tab_path), |item| item.bg(rgb(theme::FLASH)))
+            .when(self.flashing(&tab_path), |item| item.bg(rgb(theme::FLASH)).hover(|style| style.bg(rgb(theme::FLASH))))
             .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
                 this.item_gesture(Gesture::MiddleClick, tab_path.clone(), true, cx);
             }))
@@ -1019,6 +1021,7 @@ impl Render for Browser {
             self.drag_tick = None;
         }
         let drag_bar = dragging.then(|| self.drag_bar(cx));
+        let flash = self.flashing_view(cx).then(|| div().absolute().size_full().bg(rgba(theme::FLASH_TINT)));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
         gpui::set_drop_volume(&volume_of(self.tab.history.current()));
         div()
@@ -1057,7 +1060,7 @@ impl Render for Browser {
                     cx.notify();
                 }
             }))
-            .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
+            .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().relative().flex().flex_col().flex_1().min_w_0().child(body).children(flash)))
             .child(status)
             .children(band)
             .children(drag_bar)
