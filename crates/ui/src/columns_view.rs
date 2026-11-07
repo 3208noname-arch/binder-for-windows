@@ -162,6 +162,34 @@ impl Browser {
         }
     }
 
+    /// クリックを通らずに行を選ぶ時に使う。カラムでは列の選択と右の列も一緒に変える。
+    pub fn select_pressed(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match self.column_item(&path, cx) {
+            Some((column, name, entry)) => self.select_in_column(column, name, entry, cx),
+            None => self.selection.select_only(path),
+        }
+    }
+
+    /// `path` を行に持つ列と、その項目。
+    fn column_item(&self, path: &Path, cx: &Context<Self>) -> Option<(usize, OsString, Entry)> {
+        if self.view.mode != ViewMode::Columns {
+            return None;
+        }
+        let (parent, name) = (path.parent()?, path.file_name()?);
+        let column = self.columns.iter().position(|column| column.pane.read(cx).state.path == parent)?;
+        let pane = self.columns[column].pane.read(cx);
+        let entry = pane.state.entries.iter().find(|entry| entry.os_name() == name)?.clone();
+        Some((column, name.to_os_string(), entry))
+    }
+
+    /// カラムの親の列で、開いているフォルダの行か。
+    pub fn is_open_in_column(&self, path: &Path, cx: &Context<Self>) -> bool {
+        self.view.mode == ViewMode::Columns
+            && self.columns.iter().any(|column| {
+                column.selected.as_deref() == path.file_name() && path.parent() == Some(column.pane.read(cx).state.path.as_path())
+            })
+    }
+
     /// 列の項目を選ぶ。右の列を閉じ、フォルダなら新しい列を開く。
     pub fn select_in_column(&mut self, column: usize, name: OsString, entry: Entry, cx: &mut Context<Self>) {
         let Some(current) = self.columns.get_mut(column) else { return };

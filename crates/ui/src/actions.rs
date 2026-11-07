@@ -164,7 +164,6 @@ impl Browser {
         if self.renaming.as_ref().is_some_and(|renaming| renaming.path == path) {
             return;
         }
-        self.soft_selection = false;
         let modifiers = event.modifiers();
         if event.click_count() == 2 && !modifiers.control && !modifiers.shift {
             self.open_item(path, is_dir, cx);
@@ -224,10 +223,17 @@ impl Browser {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.grab_press = true))
     }
 
+    /// ドラッグが乗った時の背景。文字が白い選択行に灰色を敷くと読めないので、濃い青にする。
+    fn drop_color(&self, path: &Path, cx: &Context<Self>) -> u32 {
+        let selected = self.selection.contains(path) || self.is_open_in_column(path, cx);
+        if selected && self.selection_colors().1 == theme::SELECTED_TEXT { theme::SELECTED_DROP } else { theme::HOVER }
+    }
+
     /// 項目の共通のマウス操作。押下の記録、右クリック、ドロップの受け入れ。
     ///
     /// `band` が `Some` の時は、`grab_zone` の外を押すと範囲選択になる。
     pub fn item_mouse(&self, row: Stateful<gpui::Div>, path: PathBuf, is_dir: bool, band: Option<Option<usize>>, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+        let drop_color = self.drop_color(&path, cx);
         let (press_path, menu_path, drop_path) = (path.clone(), path.clone(), path);
         row.on_mouse_down(
             MouseButton::Left,
@@ -254,7 +260,7 @@ impl Browser {
         .when(is_dir, |row| {
             let (spring_path, over_path) = (drop_path.clone(), drop_path.clone());
             row.drag_over::<ExternalPaths>(move |style, paths: &ExternalPaths, _, _| {
-                if carries(paths.paths(), &over_path) { style } else { style.bg(rgb(theme::HOVER)) }
+                if carries(paths.paths(), &over_path) { style } else { style.bg(rgb(drop_color)) }
             })
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 if !carries(event.drag(cx).paths(), &spring_path) {
@@ -286,7 +292,7 @@ impl Browser {
             return;
         }
         if !self.selection.contains(&press.path) {
-            self.selection.select_only(press.path.clone());
+            self.select_pressed(press.path.clone(), cx);
         }
         let Some((folder, names)) = self.selection_in_folder_of(&press.path) else { return };
         let hwnd = self.hwnd;
@@ -344,7 +350,7 @@ impl Browser {
 
     fn item_menu(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.selection.contains(&path) {
-            self.selection.select_only(path.clone());
+            self.select_pressed(path.clone(), cx);
         }
         let Some((folder, names)) = self.selection_in_folder_of(&path) else { return };
         let hwnd = self.hwnd;
@@ -547,7 +553,6 @@ impl Browser {
         let start = point(position.x - view.bounds.origin.x, position.y - view.bounds.origin.y - view.scroll);
         let base = if control { self.selection.paths() } else { Vec::new() };
         self.band = Some(Band { start, current: position, column, base });
-        self.soft_selection = true;
         self.band_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(BAND_TICK).await;
@@ -608,6 +613,7 @@ impl Browser {
             }
         };
         self.selection.select_all(&[base, hits].concat());
+        self.selection.soften();
         cx.notify();
         true
     }
@@ -877,7 +883,7 @@ impl Browser {
     }
 
     pub fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.soft_selection = false;
+        self.selection.harden();
         if self.renaming.is_some() || self.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window)) {
             return;
         }

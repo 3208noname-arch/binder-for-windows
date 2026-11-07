@@ -109,7 +109,6 @@ pub struct Browser {
     pub settings: AppSettings,
     pub settings_model: Entity<SettingsModel>,
     settings_window: Option<WindowHandle<SettingsView>>,
-    pub soft_selection: bool,
     pub suppress_click: bool,
     /// 今の押下が `grab_zone` の上だった
     pub grab_press: bool,
@@ -215,7 +214,6 @@ impl Browser {
             settings,
             settings_model,
             settings_window: None,
-            soft_selection: false,
             suppress_click: false,
             grab_press: false,
             band_task: None,
@@ -515,7 +513,7 @@ impl Browser {
 
     /// 選択の色。別のウィンドウへ移った時は灰色にする。
     pub fn selection_colors(&self) -> (u32, u32) {
-        if self.soft_selection {
+        if self.selection.is_soft() {
             (theme::SELECTED_SOFT, theme::TEXT)
         } else if self.window_active {
             (theme::SELECTED, theme::SELECTED_TEXT)

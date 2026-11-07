@@ -84,6 +84,7 @@ pub const STRIPE: u32 = 0xf4f5f7;
 pub const HOVER: u32 = 0xe4e6ea;
 pub const SELECTED: u32 = 0x0a64d8;
 pub const SELECTED_TEXT: u32 = 0xffffff;
+pub const SELECTED_DROP: u32 = 0x0848a0;
 pub const SELECTED_INACTIVE: u32 = 0xd3d5da;
 pub const ERROR_TEXT: u32 = 0xc42b1c;
 pub const SEGMENT: u32 = 0xdfe1e5;

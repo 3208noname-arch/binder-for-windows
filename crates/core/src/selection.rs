@@ -7,6 +7,7 @@ pub struct Selection {
     items: HashSet<PathBuf>,
     anchor: Option<PathBuf>,
     cursor: Option<PathBuf>,
+    soft: bool,
 }
 
 impl Selection {
@@ -27,11 +28,22 @@ impl Selection {
         let inside_selected = |path: &&PathBuf| path.ancestors().skip(1).any(|parent| self.items.contains(parent));
         self.items.iter().filter(|path| !inside_selected(path)).cloned().collect()
     }
+    /// 範囲選択で選んだ状態か。次に選択を変えるかキーを押すまで、薄い色で示す。
+    pub fn is_soft(&self) -> bool {
+        self.soft
+    }
+    pub fn soften(&mut self) {
+        self.soft = true;
+    }
+    pub fn harden(&mut self) {
+        self.soft = false;
+    }
     pub fn clear(&mut self) {
         *self = Self::default();
     }
     /// 普通のクリック。その項目だけを選ぶ。
     pub fn select_only(&mut self, path: PathBuf) {
+        self.soft = false;
         self.items.clear();
         self.items.insert(path.clone());
         self.anchor = Some(path.clone());
@@ -39,6 +51,7 @@ impl Selection {
     }
     /// Ctrl+クリック。
     pub fn toggle(&mut self, path: PathBuf) {
+        self.soft = false;
         if !self.items.remove(&path) {
             self.items.insert(path.clone());
         }
@@ -50,11 +63,13 @@ impl Selection {
         let anchor = self.anchor.clone().unwrap_or_else(|| path.to_path_buf());
         let position = |target: &Path| ordered.iter().position(|item| item == target);
         let (Some(from), Some(to)) = (position(&anchor), position(path)) else { return };
+        self.soft = false;
         self.items = ordered[from.min(to)..=from.max(to)].iter().cloned().collect();
         self.anchor = Some(anchor);
         self.cursor = Some(path.to_path_buf());
     }
     pub fn select_all(&mut self, ordered: &[PathBuf]) {
+        self.soft = false;
         self.items = ordered.iter().cloned().collect();
     }
     /// 矢印キー。`delta` 行動かす。`extend` はShiftを押している時。動いた先を返す。
@@ -80,6 +95,7 @@ impl Selection {
         self.items.retain(|item| existing.contains(item));
         self.anchor.take_if(|path| !existing.contains(path));
         self.cursor.take_if(|path| !existing.contains(path));
+        self.soft &= !self.items.is_empty();
     }
 }
 
@@ -94,6 +110,49 @@ mod tests {
         let mut paths: Vec<_> = s.paths().iter().map(|p| p.display().to_string()).collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn every_change_ends_the_soft_look() {
+        let changes: [fn(&mut Selection); 6] = [
+            |s| s.select_only(PathBuf::from("a")),
+            |s| s.toggle(PathBuf::from("a")),
+            |s| s.extend_to(Path::new("b"), &list()),
+            |s| s.select_all(&list()),
+            |s| s.clear(),
+            |s| {
+                s.move_cursor(1, false, &list());
+            },
+        ];
+        for change in changes {
+            let mut s = Selection::default();
+            s.select_all(&list());
+            s.soften();
+            assert!(s.is_soft());
+            change(&mut s);
+            assert!(!s.is_soft());
+        }
+    }
+
+    #[test]
+    fn soft_look_ends_when_nothing_is_left() {
+        let mut s = Selection::default();
+        s.select_all(&list());
+        s.soften();
+        s.retain_existing(&[PathBuf::from("a")]);
+        assert!(s.is_soft());
+        s.retain_existing(&[]);
+        assert!(!s.is_soft());
+    }
+
+    #[test]
+    fn soft_look_is_not_set_by_selecting() {
+        let mut s = Selection::default();
+        s.select_only(PathBuf::from("a"));
+        assert!(!s.is_soft());
+        s.soften();
+        s.harden();
+        assert!(!s.is_soft());
     }
 
     #[test]
