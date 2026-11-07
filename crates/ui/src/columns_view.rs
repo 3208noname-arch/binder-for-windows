@@ -286,6 +286,7 @@ impl Browser {
                 let icon = self.icons.update(cx, |icons, _| icons.get(&folder, &entry, SMALL));
                 let name = entry.os_name().to_os_string();
                 let is_dir = entry.is_dir;
+                let empty = self.is_empty_folder(&path, &entry, cx);
                 let icon = self.item_icon(&entry, icon, theme::ROW_ICON);
                 let renaming = self.tab.renaming.as_ref().is_some_and(|renaming| renaming.path == path);
                 let label = div()
@@ -312,7 +313,8 @@ impl Browser {
                     .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
                     .child(label)
                     .child(div().flex_1())
-                    .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")));
+                    .when(is_dir && !empty, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")))
+                    .when(empty, |row| row.child(Self::empty_mark()));
                 let click_path = path.clone();
                 Some(
                     self.item_mouse(row, path, is_dir, Some(Some(column)), cx)

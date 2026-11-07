@@ -148,6 +148,11 @@ impl Browser {
         self.tab.search_box.as_ref()?;
         let folder = self.current_folder(cx);
         let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let state = &self.tab.pane.read(cx).state;
+        let found = self.tab.search_run.is_some().then(|| {
+            let count = state.entries.len();
+            if state.loading { format!("{count} 件（検索中）") } else { format!("{count} 件") }
+        });
         Some(
             div()
                 .flex()
@@ -163,7 +168,8 @@ impl Browser {
                 .child(div().text_color(rgb(theme::SUB_TEXT)).child("検索:"))
                 .child(self.search_scope("scope-all", "配下すべて", true, cx))
                 .child(self.search_scope("scope-here", "このフォルダだけ", false, cx))
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(theme::SUB_TEXT)).child(name)),
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(rgb(theme::SUB_TEXT)).child(name))
+                .children(found.map(|found| div().flex_none().ml_auto().text_color(rgb(theme::SUB_TEXT)).child(found))),
         )
     }
 }

@@ -170,9 +170,10 @@ impl Browser {
     }
 
     /// アイコンの下の名前。3行に収まらない分は薄く消し、設定によってマウスを乗せると流す。
-    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window) -> AnyElement {
+    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, empty: bool, look: LabelLook, window: &Window) -> AnyElement {
         let width = theme::grid_label_width(self.tab.view.icon_size);
-        let lines = label_lines(&entry.name, width, window);
+        let name = if empty { format!("{}（空）", entry.name) } else { entry.name.clone() };
+        let lines = label_lines(&name, width, window);
         if let Some(renaming) = self.tab.renaming.as_ref().filter(|renaming| renaming.path == path) {
             return self.grid_rename(lines, renaming.input.clone());
         }
@@ -189,7 +190,7 @@ impl Browser {
             .when(look.highlight, |label| label.bg(rgb(look.fill)))
             .when(look.selected, |label| label.text_color(rgb(look.text)))
             .when(overflowing, |label| label.h(px(line * theme::GRID_LABEL_LINES)));
-        let text = div().text_center().child(entry.name.clone());
+        let text = div().text_center().child(name);
         let label = if overflowing && hovered && self.settings.scroll_long_names {
             // 全文が見えた位置で止める。名前は行で読むものなので、横には動かさない
             let distance = (lines - theme::GRID_LABEL_LINES) * line;
@@ -234,7 +235,8 @@ impl Browser {
             _ => theme::BACKGROUND,
         };
         let look = LabelLook { selected, highlight, fill, text: selected_text };
-        let label = self.grid_label(ix, &path, entry, look, window);
+        let empty = self.is_empty_folder(&path, entry, cx);
+        let label = self.grid_label(ix, &path, entry, empty, look, window);
         let label_path = path.clone();
         let cell = div()
             .id(("cell", ix))

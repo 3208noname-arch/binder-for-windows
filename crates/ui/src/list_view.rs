@@ -227,6 +227,7 @@ impl Browser {
             .w(px(column.width))
             .cursor(CursorStyle::PointingHand)
             .when(dropping, |cell| cell.bg(rgb(theme::HOVER)))
+            .when(self.header_drag.is_some_and(|drag| drag.index == index), |cell| cell.bg(rgb(theme::SEGMENT)))
             .when(column.field == Field::Name, |cell| cell.pl(px(theme::DISCLOSURE_WIDTH + theme::ROW_ICON + theme::FIELD_GAP)))
             .child(div().overflow_hidden().whitespace_nowrap().child(format!("{}{mark}", column.field.label())))
             .child(handle)
@@ -236,11 +237,14 @@ impl Browser {
                     cx.stop_propagation();
                     this.menu = None;
                     this.header_drag = Some(HeaderDrag { index, start_x: event.position.x.into(), target: None });
+                    cx.notify();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    // 一覧の余白の右クリックメニューまで届かせない
+                    cx.stop_propagation();
                     this.menu = Some(Menu::Fields(event.position));
                     cx.notify();
                 }),
@@ -262,7 +266,8 @@ impl Browser {
         let expanded = expanded.is_some();
         let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
         let slot = div().flex_none().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
-        let disclosure = if is_dir && self.tab.search_run.is_none() {
+        let empty = self.is_empty_folder(path, entry, cx);
+        let disclosure = if is_dir && !empty && self.tab.search_run.is_none() {
             let target = path.to_path_buf();
             slot.id(gpui::ElementId::Name(format!("open-{}", path.display()).into()))
                 .cursor(CursorStyle::PointingHand)
@@ -283,7 +288,8 @@ impl Browser {
             .min_w_0()
             .when(renaming, |label| label.flex_1())
             .child(self.item_icon(entry, icon, theme::ROW_ICON))
-            .child(self.name_or_input(path, entry));
+            .child(self.name_or_input(path, entry))
+            .when(empty, |label| label.child(Self::empty_mark()));
         let label = self.grab_zone(label, cx);
         div()
             .flex()
@@ -408,6 +414,22 @@ impl Browser {
                 ),
             );
         strip.style().restrict_scroll_to_axis = Some(true);
-        div().relative().flex_1().min_h_0().flex().flex_col().child(strip).children(vertical_bar).children(horizontal_bar)
+        // 行が横幅いっぱいに並ぶので、選択を解除する場所を右端に残す
+        let clear_zone = div()
+            .id("list-clear")
+            .absolute()
+            .top(px(theme::ROW_HEIGHT))
+            .bottom_0()
+            .right(px(theme::SCROLL_MARGIN * 2. + theme::SCROLL_WIDTH))
+            .w(px(theme::CLEAR_ZONE_WIDTH))
+            .cursor(CursorStyle::Arrow)
+            .hover(|style| style.bg(rgb(theme::HOVER)))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.commit_rename(window, cx);
+                this.clear_selection(cx);
+            }));
+        div().relative().flex_1().min_h_0().flex().flex_col().child(strip).child(clear_zone).children(vertical_bar).children(horizontal_bar)
     }
 }

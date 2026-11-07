@@ -3,9 +3,9 @@
 use crate::browser::Browser;
 use crate::theme;
 use filer_core::{MAX_ICON_SIZE, MIN_ICON_SIZE};
-use filer_core::ScrollbarMode;
+use filer_core::{ScrollbarMode, ViewMode};
 use gpui::{
-    AnyElement, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Point, ScrollHandle, div, point,
+    AnyElement, Bounds, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, div, point,
     prelude::*, px, rgba,
 };
 use std::time::{Duration, Instant};
@@ -205,14 +205,60 @@ impl Browser {
     pub fn drag_scroll(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         let Some(drag) = self.scroll_drag else { return };
         let offset = drag.start_offset + (along(event.position, drag.vertical) - drag.start) * drag.scale;
-        let offset = -offset.max(0.0);
-        if drag.target == ScrollTarget::Grid {
-            self.tab.grid_list.set_offset_from_scrollbar(point(px(0.), px(offset)));
-        } else if let Some(handle) = self.scroll_handle(drag.target) {
-            let current = handle.offset();
-            handle.set_offset(if drag.vertical { point(current.x, px(offset)) } else { point(px(offset), current.y) });
-        }
+        self.set_scroll(drag.target, drag.vertical, offset);
         cx.notify();
+    }
+
+    fn set_scroll(&mut self, target: ScrollTarget, vertical: bool, offset: f32) {
+        let offset = -offset.max(0.0);
+        if target == ScrollTarget::Grid {
+            self.tab.grid_list.set_offset_from_scrollbar(point(px(0.), px(offset)));
+        } else if let Some(handle) = self.scroll_handle(target) {
+            let current = handle.offset();
+            handle.set_offset(if vertical { point(current.x, px(offset)) } else { point(px(offset), current.y) });
+        }
+    }
+
+    /// カーソルの下の、縦に動く一覧。
+    fn scroll_target_at(&self, position: Point<Pixels>) -> Option<(ScrollTarget, Bounds<Pixels>)> {
+        let fixed = |target| self.scroll_handle(target).map(|handle| (target, handle.bounds()));
+        if f32::from(position.x) < theme::SIDEBAR_WIDTH {
+            return fixed(ScrollTarget::Sidebar);
+        }
+        match self.tab.view.mode {
+            ViewMode::List => fixed(ScrollTarget::List),
+            ViewMode::Icons => Some((ScrollTarget::Grid, self.tab.grid_list.viewport_bounds())),
+            ViewMode::Columns => (0..self.tab.columns.len())
+                .filter_map(|index| fixed(ScrollTarget::Column(index)))
+                .find(|(_, bounds)| bounds.left() <= position.x && position.x < bounds.right()),
+        }
+    }
+
+    /// ドラッグ中のスクロール。ホイールの回転と、一覧の上下の端で止まった時に送る。
+    pub fn scroll_while_dragging(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let elapsed = self.drag_tick.replace(now).map_or(0., |last| now.duration_since(last).as_secs_f32().min(0.1));
+        let wheel = filer_shell::take_wheel();
+        let Some((target, bounds)) = self.scroll_target_at(position) else { return };
+        // 下の端は、ドラッグ中の帯の上までにする
+        let floor = f32::from(self.viewport.height) - theme::STATUS_HEIGHT - theme::DRAG_BAR_HEIGHT;
+        let (top, bottom) = (f32::from(bounds.top()), f32::from(bounds.bottom()).min(floor));
+        let y = f32::from(position.y);
+        let mut delta = -(wheel as f32) / 120. * theme::DRAG_WHEEL_STEP;
+        if y >= top - theme::ROW_HEIGHT && y < top + theme::DRAG_EDGE_WIDTH {
+            delta -= theme::DRAG_EDGE_SPEED * elapsed;
+        } else if y > bottom - theme::DRAG_EDGE_WIDTH && y <= bottom {
+            delta += theme::DRAG_EDGE_SPEED * elapsed;
+        }
+        if delta == 0. {
+            return;
+        }
+        let Some(metrics) = self.scroll_metrics(target, true) else { return };
+        let offset = (metrics.offset + delta).clamp(0., metrics.max);
+        if offset != metrics.offset {
+            self.set_scroll(target, true, offset);
+            cx.notify();
+        }
     }
 
     /// 下の帯のアイコンの大きさの部品。

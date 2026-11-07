@@ -2,7 +2,7 @@
 
 use crate::open_store;
 use crate::theme;
-use filer_core::{AppSettings, MAX_SPRING_MS, MIN_SPRING_MS, ScrollbarMode, snap_spring_ms};
+use filer_core::{AppSettings, MAX_FLASH_MS, MAX_SPRING_MS, MIN_SPRING_MS, ScrollbarMode, snap_flash_ms, snap_spring_ms};
 use filer_store::Store;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Stateful, Window, div, prelude::*,
@@ -21,6 +21,25 @@ enum Delay {
     List,
     Icons,
     Column,
+    Flash,
+}
+
+impl Delay {
+    fn range(self) -> (u64, u64) {
+        if self == Delay::Flash { (0, MAX_FLASH_MS) } else { (MIN_SPRING_MS, MAX_SPRING_MS) }
+    }
+
+    fn snap(self, ms: f32) -> u64 {
+        if self == Delay::Flash { snap_flash_ms(ms) } else { snap_spring_ms(ms) }
+    }
+
+    fn label(self, ms: u64) -> String {
+        match self {
+            Delay::Flash if ms == 0 => "点滅しない".to_string(),
+            Delay::Flash => format!("{ms} ミリ秒"),
+            _ => format!("{:.1} 秒", ms as f32 / 1000.),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +62,7 @@ fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
         Delay::List => &mut settings.spring_list_ms,
         Delay::Icons => &mut settings.spring_icons_ms,
         Delay::Column => &mut settings.spring_column_ms,
+        Delay::Flash => &mut settings.move_flash_ms,
     }
 }
 
@@ -99,8 +119,8 @@ impl SettingsView {
     }
 
     fn slider(&self, id: &'static str, label: &'static str, delay: Delay, value: u64, cx: &mut Context<Self>) -> AnyElement {
-        let range = (MAX_SPRING_MS - MIN_SPRING_MS) as f32;
-        let ratio = (value - MIN_SPRING_MS) as f32 / range;
+        let (low, high) = delay.range();
+        let ratio = (value - low) as f32 / (high - low) as f32;
         div()
             .flex()
             .items_center()
@@ -133,7 +153,7 @@ impl SettingsView {
                         }),
                     ),
             )
-            .child(div().w(px(56.)).text_color(rgb(theme::SUB_TEXT)).child(format!("{:.1} 秒", value as f32 / 1000.)))
+            .child(div().w(px(80.)).text_color(rgb(theme::SUB_TEXT)).child(delay.label(value)))
             .into_any_element()
     }
 
@@ -145,8 +165,9 @@ impl SettingsView {
             return;
         }
         let moved = f32::from(event.position.x) - drag.start_x;
-        let per_pixel = (MAX_SPRING_MS - MIN_SPRING_MS) as f32 / (theme::SETTINGS_SLIDER_WIDTH - 14.);
-        let value = snap_spring_ms(drag.start_ms + moved * per_pixel);
+        let (low, high) = drag.delay.range();
+        let per_pixel = (high - low) as f32 / (theme::SETTINGS_SLIDER_WIDTH - 14.);
+        let value = drag.delay.snap(drag.start_ms + moved * per_pixel);
         self.model.update(cx, |model, cx| {
             *delay_field(&mut model.value, drag.delay) = value;
             cx.notify();
@@ -182,6 +203,15 @@ impl Render for SettingsView {
             .child(self.slider("delay-column", "カラムのフォルダ", Delay::Column, settings.spring_column_ms, cx))
             .child(self.slider("delay-first", "帯やサイドバー（最初）", Delay::OpenFirst, settings.spring_first_ms, cx))
             .child(self.slider("delay-next", "帯やサイドバー（2回目以降）", Delay::OpenNext, settings.spring_next_ms, cx))
+            .child(Self::heading("タブ"))
+            .child(Self::choice("focus-new-tabs", "フォルダを新しいタブで開いたら、そのタブへ切り替える", settings.focus_new_tabs).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.focus_new_tabs = !settings.focus_new_tabs);
+            })))
+            .child(Self::choice("wheel-tabs", "タブの帯の上のホイールで切り替える", settings.wheel_switches_tabs).on_click(cx.listener(|this, _, _, cx| {
+                this.change(cx, |settings| settings.wheel_switches_tabs = !settings.wheel_switches_tabs);
+            })))
+            .child(Self::heading("ファイルの移動"))
+            .child(self.slider("flash-interval", "移動の直前の点滅の間隔", Delay::Flash, settings.move_flash_ms, cx))
             .child(Self::heading("一覧"))
             .child(Self::choice("show-hidden", "隠し項目を表示する（Ctrl+Shift+.）", settings.show_hidden).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.show_hidden = !settings.show_hidden);

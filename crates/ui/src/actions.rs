@@ -5,7 +5,7 @@ use crate::icons_view::{GridRow, grid_item_rects, grid_metrics};
 use crate::list_tree::{Flattened, Row, group_range};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use filer_core::{Entry, ViewMode, rows_in_band};
+use filer_core::{Chord, Command, Entry, Gesture, ViewMode, rows_in_band};
 use filer_shell::{
     MenuChoice, Opened, Operation, Prompt, clipboard_files, cursor_position, drag_items, init_thread, left_button_down, open_target, remove_ime_caret, run_recording_undo,
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 名前を編集している最中の状態。
 pub struct Renaming {
@@ -56,6 +56,24 @@ pub struct Spring {
     _task: Task<()>,
 }
 
+/// 移動やコピーの直前に点滅している項目。
+pub struct Flash {
+    pub paths: HashSet<PathBuf>,
+    pub lit: bool,
+}
+
+/// 右クリックの「新規作成」で増える項目を待つ間の状態。
+pub struct NewItems {
+    folder: PathBuf,
+    known: HashSet<OsString>,
+    until: Instant,
+}
+
+/// ショートカットのファイルか。
+pub fn is_shortcut(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+}
+
 /// 範囲選択の最中の状態。始点はスクロールしても動かないよう、中身の座標で持つ。
 pub struct Band {
     start: Point<Pixels>,
@@ -70,6 +88,8 @@ struct BandViewport {
 }
 
 const BAND_TICK: Duration = Duration::from_millis(16);
+/// 「新規作成」の結果が一覧に現れるのを待つ時間
+const NEW_ITEM_WAIT: Duration = Duration::from_secs(5);
 
 /// 2つのパスが同じドライブ（または共有）にあるか。
 fn same_volume(a: &Path, b: &Path) -> bool {
@@ -143,12 +163,27 @@ impl Browser {
             return;
         }
         self.tab.synced_version = version;
+        self.rename_new_item(window, cx);
         let known = self.known_paths(cx);
         self.tab.selection.retain_existing(&known);
         if let Some(path) = self.tab.pending_rename.take_if(|path| known.contains(path)) {
             self.tab.selection.select_only(path.clone());
             self.begin_rename(path, window, cx);
         }
+    }
+
+    /// 「新規作成」で増えた項目を見つけたら、名前の編集を始める。
+    fn rename_new_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab.new_items.as_ref().is_some_and(|wait| wait.until < Instant::now()) {
+            self.tab.new_items = None;
+        }
+        let Some(wait) = &self.tab.new_items else { return };
+        let Some(column) = self.tab.columns.iter().find(|column| column.pane.read(cx).state.path == wait.folder) else { return };
+        let added = column.pane.read(cx).state.entries.iter().find(|entry| !wait.known.contains(entry.os_name()));
+        let Some(path) = added.map(|entry| wait.folder.join(entry.os_name())) else { return };
+        self.tab.new_items = None;
+        self.tab.selection.select_only(path.clone());
+        self.begin_rename(path, window, cx);
     }
 
     pub fn ordered_paths(&mut self, cx: &Context<Self>) -> Vec<PathBuf> {
@@ -168,8 +203,8 @@ impl Browser {
             self.open_item(path, is_dir, cx);
             return;
         }
-        if event.click_count() == 2 && modifiers.control && !modifiers.shift && is_dir {
-            self.open_in_new_tab(path, cx);
+        if event.click_count() == 2 && modifiers.control && !modifiers.shift && (is_dir || is_shortcut(&path)) {
+            self.item_gesture(Gesture::ControlDoubleClick, path, is_dir, cx);
             return;
         }
         if modifiers.control {
@@ -250,8 +285,17 @@ impl Browser {
     /// `band` が `Some` の時は、`grab_zone` の外を押すと範囲選択になる。
     pub fn item_mouse(&self, row: Stateful<gpui::Div>, path: PathBuf, is_dir: bool, band: Option<Option<usize>>, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
         let drop_color = self.drop_color(&path, cx);
-        let (press_path, menu_path, drop_path) = (path.clone(), path.clone(), path);
-        row.on_mouse_down(
+        let flashing = self.flashing(&path);
+        let (press_path, menu_path, tab_path, drop_path) = (path.clone(), path.clone(), path.clone(), path);
+        row.when(flashing, |row| row.bg(rgb(theme::FLASH)))
+            .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.item_gesture(Gesture::MiddleClick, tab_path.clone(), is_dir, cx);
+            }),
+        )
+        .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
@@ -274,15 +318,8 @@ impl Browser {
             }),
         )
         .when(is_dir, |row| {
-            let (spring_path, over_path, tab_path) = (drop_path.clone(), drop_path.clone(), drop_path.clone());
-            row.on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.open_in_new_tab(tab_path.clone(), cx);
-                }),
-            )
-            .drag_over::<ExternalPaths>(move |style, paths: &ExternalPaths, _, _| {
+            let (spring_path, over_path) = (drop_path.clone(), drop_path.clone());
+            row.drag_over::<ExternalPaths>(move |style, paths: &ExternalPaths, _, _| {
                 if carries(paths.paths(), &over_path) { style } else { style.bg(rgb(drop_color)) }
             })
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
@@ -345,18 +382,22 @@ impl Browser {
     }
 
     /// 右クリックメニューを出す。「名前の変更」が選ばれたらアプリの入力欄を開く。
-    fn run_menu(cx: &mut Context<Self>, rename: Option<PathBuf>, modal: impl FnOnce() -> Result<MenuChoice, windows::core::Error> + 'static) {
+    fn run_menu(cx: &mut Context<Self>, rename: Option<PathBuf>, created: Option<NewItems>, modal: impl FnOnce() -> Result<MenuChoice, windows::core::Error> + 'static) {
         cx.spawn(async move |this, cx| {
-            match modal() {
-                Ok(MenuChoice::Rename) => {
-                    let _ = this.update(cx, |browser, cx| {
-                        browser.tab.rename_request = rename;
-                        cx.notify();
-                    });
+            let choice = modal();
+            let _ = this.update(cx, |browser, cx| {
+                match choice {
+                    Ok(MenuChoice::Rename) => browser.tab.rename_request = rename,
+                    Ok(MenuChoice::Created) => {
+                        browser.tab.new_items = created.map(|wait| NewItems { until: Instant::now() + NEW_ITEM_WAIT, ..wait });
+                        // 一覧が先に更新されていても、次の描画で探す
+                        browser.tab.synced_version = 0;
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("メニューを出せませんでした: {error}"),
                 }
-                Ok(_) => {}
-                Err(error) => eprintln!("メニューを出せませんでした: {error}"),
-            }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -382,13 +423,21 @@ impl Browser {
         let Some((folder, names)) = self.selection_in_folder_of(&path) else { return };
         let hwnd = self.hwnd;
         cx.notify();
-        Self::run_menu(cx, Some(path), move || show_items_menu(hwnd, &folder, &names));
+        Self::run_menu(cx, Some(path), None, move || show_items_menu(hwnd, &folder, &names));
     }
 
     /// 余白の右クリック。新規作成や貼り付けのメニュー。
     pub fn folder_menu(&mut self, cx: &mut Context<Self>) {
         let (hwnd, folder) = (self.hwnd, self.current_folder(cx));
-        Self::run_menu(cx, None, move || show_folder_menu(hwnd, &folder));
+        let known = self
+            .tab
+            .columns
+            .iter()
+            .find(|column| column.pane.read(cx).state.path == folder)
+            .map(|column| column.pane.read(cx).state.entries.iter().map(|entry| entry.os_name().to_os_string()).collect())
+            .unwrap_or_default();
+        let created = NewItems { folder: folder.clone(), known, until: Instant::now() };
+        Self::run_menu(cx, None, Some(created), move || show_folder_menu(hwnd, &folder));
     }
 
     /// エクスプローラーと同じく、同じドライブなら移動、別なら複写にする。Ctrlは複写。
@@ -397,12 +446,56 @@ impl Browser {
         let items: Vec<PathBuf> =
             paths.iter().filter(|path| path.parent() != Some(target.as_path()) && !target.starts_with(path)).cloned().collect();
         let Some(first) = items.first() else { return };
+        let flashed: HashSet<PathBuf> = items.iter().cloned().chain([target.clone()]).collect();
         let operation = if copy || !same_volume(first, &target) {
             Operation::Copy { items, destination: target }
         } else {
             Operation::Move { items, destination: target }
         };
-        self.perform(operation, true, cx);
+        self.flash_then_perform(flashed, operation, cx);
+    }
+
+    /// 動く項目と行き先を点滅させてから実行する。
+    fn flash_then_perform(&mut self, paths: HashSet<PathBuf>, operation: Operation, cx: &mut Context<Self>) {
+        let interval = Duration::from_millis(self.settings.move_flash_ms);
+        if interval.is_zero() {
+            self.perform(operation, true, cx);
+            return;
+        }
+        self.flash = Some(Flash { paths, lit: true });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            for lit in [false, true] {
+                cx.background_executor().timer(interval).await;
+                let _ = this.update(cx, |browser, cx| {
+                    if let Some(flash) = &mut browser.flash {
+                        flash.lit = lit;
+                    }
+                    cx.notify();
+                });
+            }
+            cx.background_executor().timer(interval).await;
+            let _ = this.update(cx, |browser, cx| {
+                browser.flash = None;
+                browser.perform(operation, true, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 今の描画で点滅の色を出す項目か。
+    pub fn flashing(&self, path: &Path) -> bool {
+        self.flash.as_ref().is_some_and(|flash| flash.lit && flash.paths.contains(path))
+    }
+
+    /// 見えている行のフォルダが空か。分かるまでは偽。
+    pub fn is_empty_folder(&self, path: &Path, entry: &Entry, cx: &mut Context<Self>) -> bool {
+        entry.is_dir && self.empties.update(cx, |empties, _| empties.get(path, entry.modified))
+    }
+
+    /// 空のフォルダの行に添える印。
+    pub fn empty_mark() -> impl IntoElement {
+        div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).opacity(0.6).child("空")
     }
 
     /// ファイル操作を裏で実行し、終わったら表示を更新する。
@@ -535,12 +628,28 @@ impl Browser {
         }
     }
 
+    /// 止まった時の移動先のフォルダ。行の展開やタブの切り替えでは `None`。
+    fn spring_destination(&self, target: &SpringTarget, cx: &Context<Self>) -> Option<PathBuf> {
+        match target {
+            SpringTarget::Back if !self.column_pinned() => self.tab.history.peek_back().map(PathBuf::from),
+            SpringTarget::Back | SpringTarget::Parent => self.current_folder(cx).parent().map(PathBuf::from),
+            SpringTarget::Go(path) => Some(path.clone()),
+            SpringTarget::Folder(_) | SpringTarget::Tab(_) => None,
+        }
+    }
+
     fn open_hovered(&mut self, target: SpringTarget, cx: &mut Context<Self>) {
         self.spring = None;
         if !cx.has_active_drag() {
             return;
         }
         self.springs_done += 1;
+        // 行き先を開いているタブがあれば、今のタブのパスを変えずにそちらへ移る
+        let open = self.spring_destination(&target, cx).and_then(|folder| self.tab_showing(&folder, cx));
+        if let Some(id) = open {
+            self.switch_to_hovered(id, cx);
+            return;
+        }
         match target {
             SpringTarget::Back => self.back(cx),
             SpringTarget::Parent => self.parent(cx),
@@ -911,79 +1020,79 @@ impl Browser {
         }
     }
 
-    /// タブのキー。名前の入力中や検索欄の中でも効かせる。
-    fn tab_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let keystroke = &event.keystroke;
-        if event.is_held || !keystroke.modifiers.control {
-            return false;
-        }
-        match keystroke.key.as_str() {
-            "t" => self.new_tab(window, cx),
-            "w" => self.close_tab(self.tabs.index(), window, cx),
-            "tab" => self.select_tab(self.tabs.neighbor(!keystroke.modifiers.shift), window, cx),
-            _ => return false,
-        }
-        true
-    }
-
     pub fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.tab.selection.harden();
-        if self.tab_key(event, window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        if self.tab.renaming.is_some() || self.tab.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window)) {
-            return;
-        }
         let keystroke = &event.keystroke;
-        // 押しっぱなしで繰り返すのは移動だけにする
-        if event.is_held && !matches!(keystroke.key.as_str(), "up" | "down" | "left" | "right") {
+        let modifiers = keystroke.modifiers;
+        let chord = Chord::new(&keystroke.key, modifiers.control, modifiers.shift, modifiers.alt);
+        let Some(command) = self.bindings.key(&chord) else { return };
+        let typing = self.tab.renaming.is_some() || self.tab.search_box.as_ref().is_some_and(|search| search.input.focus_handle(cx).is_focused(window));
+        if (typing && !command.works_while_typing()) || (event.is_held && !command.repeats()) {
             return;
         }
-        let (control, shift, alt) = (keystroke.modifiers.control, keystroke.modifiers.shift, keystroke.modifiers.alt);
-        let rows = if self.tab.view.mode == ViewMode::Icons { self.tab.grid_per_row as isize } else { 1 };
+        if self.run_command(command, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    /// 操作を実行する。今の表示で意味が無い操作なら偽を返す。
+    pub fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mode = self.tab.view.mode;
-        match keystroke.key.as_str() {
-            "up" if alt => self.parent(cx),
-            "left" if alt => self.back(cx),
-            "right" if alt => self.forward(cx),
-            "up" => self.move_selection(-rows, shift, cx),
-            "down" => self.move_selection(rows, shift, cx),
-            "left" if mode == ViewMode::Icons => self.move_selection(-1, shift, cx),
-            "right" if mode == ViewMode::Icons => self.move_selection(1, shift, cx),
-            "left" if mode == ViewMode::Columns => self.step_column(false, cx),
-            "right" if mode == ViewMode::Columns => self.step_column(true, cx),
-            "enter" => self.open_selection(cx),
-            "backspace" => self.back(cx),
-            "escape" if self.tab.search_box.is_some() => self.drop_search(cx),
-            "escape" => {
+        let rows = if mode == ViewMode::Icons { self.tab.grid_per_row as isize } else { 1 };
+        match command {
+            Command::Parent => self.parent(cx),
+            Command::Back => self.back(cx),
+            Command::Forward => self.forward(cx),
+            Command::MoveUp => self.move_selection(-rows, false, cx),
+            Command::MoveDown => self.move_selection(rows, false, cx),
+            Command::ExtendUp => self.move_selection(-rows, true, cx),
+            Command::ExtendDown => self.move_selection(rows, true, cx),
+            Command::MoveLeft | Command::ExtendLeft | Command::MoveRight | Command::ExtendRight => {
+                let forward = matches!(command, Command::MoveRight | Command::ExtendRight);
+                let extend = matches!(command, Command::ExtendLeft | Command::ExtendRight);
+                match mode {
+                    ViewMode::Icons => self.move_selection(if forward { 1 } else { -1 }, extend, cx),
+                    ViewMode::Columns => self.step_column(forward, cx),
+                    ViewMode::List => return false,
+                }
+            }
+            Command::Open => self.open_selection(cx),
+            Command::Cancel if self.tab.search_box.is_some() => self.drop_search(cx),
+            Command::Cancel => {
                 self.cut.clear();
                 self.clear_selection(cx);
             }
-            "f" if control => self.open_search(window, cx),
-            "delete" => self.recycle_selection(cx),
-            "f2" => {
+            Command::Search => self.open_search(window, cx),
+            Command::Recycle => self.recycle_selection(cx),
+            Command::Rename => {
                 if let [path] = self.tab.selection.paths().as_slice() {
                     self.begin_rename(path.clone(), window, cx);
                 }
             }
-            "f5" => self.tab.pane.update(cx, |pane, cx| pane.reload(cx)),
-            "a" if control => {
+            Command::Reload => self.tab.pane.update(cx, |pane, cx| pane.reload(cx)),
+            Command::SelectAll => {
                 let ordered = self.ordered_paths(cx);
                 self.tab.selection.select_all(&ordered);
                 cx.notify();
             }
-            "c" if control => self.copy_selection(false, cx),
-            "x" if control => self.copy_selection(true, cx),
-            "v" if control => self.paste(cx),
-            "z" if control => self.undo_last(cx),
-            "n" if control && shift => self.new_folder(cx),
-            // gpuiは記号を打つShiftを修飾から外すので、Shift+ピリオドは「>」で届く
-            ">" if control => self.toggle_hidden(cx),
-            "." if control && shift => self.toggle_hidden(cx),
-            _ => return,
+            Command::Copy => self.copy_selection(false, cx),
+            Command::Cut => self.copy_selection(true, cx),
+            Command::Paste => self.paste(cx),
+            Command::Undo => self.undo_last(cx),
+            Command::NewFolder => self.new_folder(cx),
+            Command::ToggleHidden => self.toggle_hidden(cx),
+            Command::NewTab => self.new_tab(window, cx),
+            Command::CloseTab => self.close_tab(self.tabs.index(), window, cx),
+            Command::NextTab => self.select_tab(self.tabs.neighbor(true), window, cx),
+            Command::PreviousTab => self.select_tab(self.tabs.neighbor(false), window, cx),
+            Command::OpenInNewTab => {
+                for path in self.tab.selection.paths() {
+                    let is_dir = path.is_dir();
+                    self.open_item_in_new_tab(path.clone(), is_dir, cx);
+                }
+            }
         }
-        cx.stop_propagation();
+        true
     }
 }
 

@@ -36,6 +36,12 @@ pub struct AppSettings {
     pub scrollbar: ScrollbarMode,
     /// 隠し属性の項目も一覧に出す
     pub show_hidden: bool,
+    /// フォルダを新しいタブで開いたら、そのタブへ切り替える
+    pub focus_new_tabs: bool,
+    /// タブの帯の上のホイールでタブを切り替える
+    pub wheel_switches_tabs: bool,
+    /// 移動やコピーの直前の点滅の間隔（ミリ秒）。0なら点滅しない
+    pub move_flash_ms: u64,
 }
 
 /// スクロールバーの出し方。
@@ -49,9 +55,16 @@ pub enum ScrollbarMode {
 /// 待ち時間のスライダーの範囲（ミリ秒）。
 pub const MIN_SPRING_MS: u64 = 100;
 pub const MAX_SPRING_MS: u64 = 3000;
+/// 点滅の間隔のスライダーの上限（ミリ秒）。
+pub const MAX_FLASH_MS: u64 = 300;
 const SPRING_STEP_MS: u64 = 100;
 
 /// スライダーの値を、範囲の中の100ミリ秒刻みへ丸める。
+/// 点滅の間隔を10ミリ秒刻みにそろえる。
+pub fn snap_flash_ms(ms: f32) -> u64 {
+    (((ms / 10.).round() * 10.) as u64).min(MAX_FLASH_MS)
+}
+
 pub fn snap_spring_ms(value: f32) -> u64 {
     let snapped = (value / SPRING_STEP_MS as f32).round() as u64 * SPRING_STEP_MS;
     snapped.clamp(MIN_SPRING_MS, MAX_SPRING_MS)
@@ -69,6 +82,9 @@ impl Default for AppSettings {
             scroll_long_names: true,
             scrollbar: ScrollbarMode::WhileScrolling,
             show_hidden: false,
+            focus_new_tabs: false,
+            wheel_switches_tabs: true,
+            move_flash_ms: 70,
         }
     }
 }
@@ -342,6 +358,13 @@ mod tests {
         assert_eq!(view.mode, ViewMode::Columns);
         let saved = FolderView { mode: ViewMode::Icons, ..FolderView::default() };
         assert_eq!(FolderView::for_folder(Some(saved), ViewMode::Columns).mode, ViewMode::Icons);
+    }
+
+    #[test]
+    fn flash_interval_snaps_to_steps_within_range() {
+        assert_eq!(snap_flash_ms(74.0), 70);
+        assert_eq!(snap_flash_ms(-20.0), 0);
+        assert_eq!(snap_flash_ms(9000.0), MAX_FLASH_MS);
     }
 
     #[test]

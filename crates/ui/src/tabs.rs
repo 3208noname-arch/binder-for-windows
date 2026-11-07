@@ -1,6 +1,6 @@
 //! タブ。フォルダの見え方に関わる状態を1枚ずつ持ち、ウィンドウは選んでいる1枚だけを描く。
 
-use crate::actions::{Renaming, SpringTarget};
+use crate::actions::{NewItems, Renaming, SpringTarget, is_shortcut};
 use crate::browser::{Browser, Column, TreeKey, saved_view};
 use crate::folder_pane::FolderPane;
 use crate::icons_view::GridData;
@@ -8,11 +8,11 @@ use crate::list_tree::Flattened;
 use crate::scrollbar::{BarFade, ScrollTarget};
 use crate::search::{SearchBox, SearchRun};
 use crate::theme;
-use filer_core::{Entry, FolderView, History, SavedTab, Selection, TabSession, ViewMode};
-use filer_shell::remove_ime_caret;
+use filer_core::{Command, Entry, FolderView, Gesture, History, SavedTab, Selection, TabSession, ViewMode};
+use filer_shell::{init_thread, remove_ime_caret, shortcut_folder};
 use gpui::{
     AnyElement, App, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, ListAlignment, ListState, MouseButton, ScrollHandle,
-    UniformListScrollHandle, Window, div, prelude::*, px, rgb,
+    ScrollWheelEvent, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,8 @@ pub struct Tab {
     pub search_run: Option<SearchRun>,
     pub pending_rename: Option<PathBuf>,
     pub rename_request: Option<PathBuf>,
+    /// 右クリックの「新規作成」で増える項目を待っている
+    pub new_items: Option<NewItems>,
     pub grid_per_row: usize,
     pub synced_version: u64,
     pub list_scroll: UniformListScrollHandle,
@@ -67,6 +69,7 @@ impl Tab {
             search_run: None,
             pending_rename: None,
             rename_request: None,
+            new_items: None,
             grid_per_row: 1,
             synced_version: 0,
             list_scroll: UniformListScrollHandle::new(),
@@ -176,7 +179,59 @@ impl Browser {
         let id = tab.id;
         self.tabs.insert_after(tab);
         self.on_tab(id, cx, Self::load_tab);
+        if self.settings.focus_new_tabs {
+            self.switch_to_hovered(id, cx);
+        }
         cx.notify();
+    }
+
+    /// 項目を新しいタブで開く。ショートカットは行き先のフォルダを裏で調べてから開く。
+    pub fn open_item_in_new_tab(&mut self, path: PathBuf, is_dir: bool, cx: &mut Context<Self>) {
+        if is_dir {
+            self.open_in_new_tab(path, cx);
+            return;
+        }
+        if !is_shortcut(&path) {
+            return;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            init_thread();
+            let _ = tx.send(shortcut_folder(&path));
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(folder)) = rx.await {
+                let _ = this.update(cx, |browser, cx| browser.open_in_new_tab(folder, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// マウスの呼び出し方に割り当てた操作を、項目に対して行う。
+    pub fn item_gesture(&mut self, gesture: Gesture, path: PathBuf, is_dir: bool, cx: &mut Context<Self>) {
+        if self.bindings.gesture(gesture) == Some(Command::OpenInNewTab) {
+            self.open_item_in_new_tab(path, is_dir, cx);
+        }
+    }
+
+    /// 帯の上のホイール。1目盛りで1枚動かす。
+    fn wheel_tabs(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings.wheel_switches_tabs {
+            return;
+        }
+        self.tab_wheel += f32::from(event.delta.pixel_delta(px(theme::ROW_HEIGHT)).y);
+        if self.tab_wheel.abs() >= theme::ROW_HEIGHT {
+            let forward = self.tab_wheel < 0.;
+            self.tab_wheel = 0.;
+            self.select_tab(self.tabs.neighbor(forward), window, cx);
+        }
+    }
+
+    /// `path` を表示している別のタブ。
+    pub fn tab_showing(&self, path: &Path, cx: &App) -> Option<u64> {
+        let key = |path: &Path| path.to_string_lossy().to_lowercase();
+        let wanted = key(path);
+        self.tabs.iter(&self.tab).find(|tab| tab.id != self.tab.id && key(&tab.folder(cx)) == wanted).map(|tab| tab.id)
     }
 
     /// `index` のタブを閉じる。最後の1枚ならウィンドウを閉じる。
@@ -297,8 +352,15 @@ impl Browser {
             .px_1()
             .border_r_1()
             .border_color(rgb(theme::LINE))
-            .bg(rgb(if active { theme::BACKGROUND } else { theme::BAR }))
-            .when(!active, |item| item.cursor(CursorStyle::PointingHand).hover(|style| style.bg(rgb(theme::HOVER))))
+            .bg(rgb(if self.flashing(&tab.folder(cx)) {
+                theme::FLASH
+            } else if active {
+                theme::BACKGROUND
+            } else {
+                theme::BAR
+            }))
+            .when(!active, |item| item.cursor(CursorStyle::PointingHand))
+            .when(!active && !self.flashing(&tab.folder(cx)), |item| item.hover(|style| style.bg(rgb(theme::HOVER))))
             .child(close)
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(title_of(&tab.folder(cx))))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
@@ -327,39 +389,35 @@ impl Browser {
             .into_any_element()
     }
 
-    /// ツールバーの下のタブの帯。1枚の時は出さない。
-    pub fn tab_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if self.tabs.len() < 2 {
-            return None;
-        }
+    /// ツールバーの下のタブの帯。
+    pub fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let items: Vec<AnyElement> = self.tabs.iter(&self.tab).map(|tab| self.tab_item(tab, tab.id == self.tab.id, cx)).collect();
-        Some(
-            div()
-                .id("tab-bar")
-                .flex()
-                .flex_none()
-                .items_center()
-                .h(px(theme::TAB_BAR_HEIGHT))
-                .bg(rgb(theme::BAR))
-                .border_b_1()
-                .border_color(rgb(theme::LINE))
-                .text_size(px(theme::SMALL_TEXT_SIZE))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.commit_rename(window, cx)))
-                .children(items)
-                .child(
-                    div()
-                        .id("tab-new")
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .w(px(theme::TAB_NEW_WIDTH))
-                        .h_full()
-                        .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(rgb(theme::HOVER)))
-                        .child("+")
-                        .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
-                ),
-        )
+        div()
+            .id("tab-bar")
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(theme::TAB_BAR_HEIGHT))
+            .bg(rgb(theme::BAR))
+            .border_b_1()
+            .border_color(rgb(theme::LINE))
+            .text_size(px(theme::SMALL_TEXT_SIZE))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.commit_rename(window, cx)))
+            .on_scroll_wheel(cx.listener(Self::wheel_tabs))
+            .children(items)
+            .child(
+                div()
+                    .id("tab-new")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(theme::TAB_NEW_WIDTH))
+                    .h_full()
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(rgb(theme::HOVER)))
+                    .child("+")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
+            )
     }
 }

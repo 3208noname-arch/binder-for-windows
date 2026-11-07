@@ -1,6 +1,7 @@
-use crate::actions::{Band, RowPress, Spring, SpringTarget};
+use crate::actions::{Band, Flash, RowPress, Spring, SpringTarget};
 use crate::scrollbar::{BarFade, IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::settings_view::{SettingsModel, SettingsView};
+use crate::empty_cache::EmptyCache;
 use crate::folder_pane::{FolderPane, tree_for};
 use crate::icon_cache::IconCache;
 use crate::list_tree::Flattened;
@@ -8,7 +9,7 @@ use crate::size_cache::SizeCache;
 use crate::tabs::Tab;
 use crate::theme;
 use filer_core::{
-    AppSettings, Date, Entry, Field, FolderView, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
+    AppSettings, Bindings, Date, Entry, Field, FolderView, Gesture, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
@@ -79,6 +80,15 @@ pub struct Browser {
     /// 選んでいないタブの並び
     pub tabs: TabList<Tab>,
     pub tab_ids: u64,
+    /// タブの帯のホイールの、まだ切り替えに使っていない回転量
+    pub tab_wheel: f32,
+    /// キーとマウスの呼び出し方から操作を引く表
+    pub bindings: Bindings,
+    /// 移動の直前に点滅している項目
+    pub flash: Option<Flash>,
+    /// ドラッグ中に前回スクロールを調べた時刻
+    pub drag_tick: Option<Instant>,
+    pub empties: Entity<EmptyCache>,
     /// 真なら、タブの並びを次回の起動のために残す
     pub keeps_session: bool,
     pub saved_session: Option<TabSession>,
@@ -169,10 +179,17 @@ impl Browser {
         cx.observe(&icons, |_, _, cx| cx.notify()).detach();
         let sizes = cx.new(SizeCache::new);
         cx.observe(&sizes, |_, _, cx| cx.notify()).detach();
+        let empties = cx.new(EmptyCache::new);
+        cx.observe(&empties, |_, _, cx| cx.notify()).detach();
         let mut browser = Self {
             tab: Tab::new(0, path, view, pane, true),
             tabs: TabList::default(),
             tab_ids: 0,
+            tab_wheel: 0.,
+            bindings: Bindings::default(),
+            flash: None,
+            drag_tick: None,
+            empties,
             keeps_session: restore,
             saved_session: None,
             store,
@@ -858,7 +875,10 @@ impl Browser {
                 let copy = filer_shell::control_down();
                 this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
             }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| this.open_in_new_tab(tab_path.clone(), cx)))
+            .when(self.flashing(&tab_path), |item| item.bg(rgb(theme::FLASH)))
+            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
+                this.item_gesture(Gesture::MiddleClick, tab_path.clone(), true, cx);
+            }))
             .on_click(cx.listener(move |this, _, _, cx| this.navigate(path.clone(), cx)))
     }
 
@@ -993,8 +1013,10 @@ impl Render for Browser {
         let menu = self.open_menu(cx);
         let band = self.band_view();
         let dragging = cx.has_active_drag();
+        filer_shell::watch_wheel(dragging);
         if !dragging {
             self.end_spring();
+            self.drag_tick = None;
         }
         let drag_bar = dragging.then(|| self.drag_bar(cx));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
@@ -1026,9 +1048,10 @@ impl Render for Browser {
                 }),
             )
             .child(toolbar)
-            .children(tab_bar)
+            .child(tab_bar)
             .children(search_bar)
-            .on_drag_move::<ExternalPaths>(cx.listener(|this, _: &DragMoveEvent<ExternalPaths>, _, cx| {
+            .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                this.scroll_while_dragging(event.event.position, cx);
                 if !this.drag_seen {
                     this.drag_seen = true;
                     cx.notify();

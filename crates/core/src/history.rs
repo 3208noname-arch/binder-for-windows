@@ -32,6 +32,10 @@ impl History {
         self.back.push(std::mem::replace(&mut self.current, next));
         Some(&self.current)
     }
+    /// 戻った時の行き先。
+    pub fn peek_back(&self) -> Option<&Path> {
+        self.back.last().map(PathBuf::as_path)
+    }
     pub fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }

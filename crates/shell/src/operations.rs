@@ -195,6 +195,11 @@ pub fn resolve_shortcut(path: &Path) -> Option<PathBuf> {
 ///
 /// シェルは内部でウィンドウのメッセージを回すので、gpuiの更新処理の中で呼ぶと、
 /// 届いた裏の処理が更新を重ねて落ちる。遅いNASでも待たされないよう、裏のスレッドで呼ぶ。
+/// フォルダを指すショートカットなら、その行き先。
+pub fn shortcut_folder(path: &Path) -> Option<PathBuf> {
+    resolve_shortcut(path).filter(|target| target.is_dir())
+}
+
 pub fn open_target(path: &Path) -> Result<Opened, String> {
     let is_link = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"));
     if let Some(target) = is_link.then(|| resolve_shortcut(path)).flatten().filter(|target| target.is_dir()) {

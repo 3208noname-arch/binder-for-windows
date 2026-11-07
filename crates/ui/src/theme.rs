@@ -7,6 +7,16 @@ pub const ROW_HEIGHT: f32 = 24.0;
 pub const TOOLBAR_HEIGHT: f32 = 44.0;
 pub const STATUS_HEIGHT: f32 = 26.0;
 pub const TAB_BAR_HEIGHT: f32 = 28.0;
+/// リストの右端の、押すと選択を解除する帯
+pub const CLEAR_ZONE_WIDTH: f32 = 28.0;
+/// 移動の直前に点滅する色
+pub const FLASH: u32 = 0xFFD76A;
+/// ドラッグ中に端で止まった時に送る速さ（毎秒のピクセル）
+pub const DRAG_EDGE_SPEED: f32 = 480.0;
+/// ドラッグ中に端と見なす幅
+pub const DRAG_EDGE_WIDTH: f32 = 36.0;
+/// ドラッグ中のホイール1目盛りで送る量
+pub const DRAG_WHEEL_STEP: f32 = 72.0;
 pub const TAB_CLOSE_WIDTH: f32 = 18.0;
 pub const TAB_NEW_WIDTH: f32 = 32.0;
 pub const SIDEBAR_WIDTH: f32 = 190.0;

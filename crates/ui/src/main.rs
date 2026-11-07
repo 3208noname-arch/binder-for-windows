@@ -4,6 +4,7 @@
 mod actions;
 mod browser;
 mod columns_view;
+mod empty_cache;
 mod folder_pane;
 mod icon_cache;
 mod icons_view;

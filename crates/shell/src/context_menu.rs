@@ -16,8 +16,8 @@ use windows::Win32::UI::Shell::{
     SHDRAGIMAGE, SHGetDesktopFolder, SHParseDisplayName, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetCursorPos, SW_SHOWNORMAL, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
+    CreatePopupMenu, DestroyMenu, GetCursorPos, GetMenuItemCount, GetMenuItemID, GetSubMenu, HMENU, IDC_ARROW, LoadCursorW, SW_SHOWNORMAL, SetCursor, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenuEx, WM_SETCURSOR, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
 };
 use windows::core::{BOOL, GUID, HRESULT, HSTRING, Interface, PCSTR, PSTR, Result, implement, w};
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK};
@@ -59,6 +59,14 @@ fn ui_object<T: Interface>(hwnd: HWND, folder: &Path, names: &[OsString]) -> Res
 }
 
 /// サブメニューの描画に必要なメッセージを、メニューの部品へ渡す。
+fn show_arrow() {
+    unsafe {
+        if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+            SetCursor(Some(arrow));
+        }
+    }
+}
+
 unsafe extern "system" fn forward_menu_messages(
     hwnd: HWND,
     message: u32,
@@ -68,6 +76,11 @@ unsafe extern "system" fn forward_menu_messages(
     menu: usize,
 ) -> LRESULT {
     unsafe {
+        // メニューの間は、本体の部品のカーソルを出さない
+        if message == WM_SETCURSOR {
+            show_arrow();
+            return LRESULT(1);
+        }
         if matches!(message, WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR) {
             let menu = &*(menu as *const IContextMenu);
             if let Ok(menu3) = menu.cast::<IContextMenu3>() {
@@ -92,6 +105,8 @@ pub enum MenuChoice {
     Invoked,
     /// 「名前の変更」はエクスプローラーの画面の中でしか動かないので、アプリ側で行う
     Rename,
+    /// 「新規作成」の項目を実行した
+    Created,
 }
 
 /// メニューの項目の内部名を読む。
@@ -101,6 +116,21 @@ fn command_verb(menu: &IContextMenu, index: usize) -> Option<String> {
     result.ok()?;
     let length = buffer.iter().position(|&c| c == 0)?;
     Some(String::from_utf8_lossy(&buffer[..length]).into_owned())
+}
+
+/// 選んだ項目が「新規作成」の中にあるか。ファイルの項目には内部名が無いので、
+/// 同じ入れ子に「フォルダー」の内部名があるかで見分ける。
+fn in_new_menu(menu: &IContextMenu, popup: HMENU, command: u32) -> bool {
+    unsafe {
+        (0..GetMenuItemCount(Some(popup))).any(|index| {
+            let nested = GetSubMenu(popup, index);
+            let commands: Vec<u32> = (0..GetMenuItemCount(Some(nested))).map(|item| GetMenuItemID(nested, item)).collect();
+            commands.contains(&command)
+                && commands.iter().any(|&id| {
+                    (FIRST_COMMAND..=LAST_COMMAND).contains(&id) && command_verb(menu, (id - FIRST_COMMAND) as usize).as_deref() == Some("NewFolder")
+                })
+        })
+    }
 }
 
 fn track(hwnd: HWND, menu: &IContextMenu) -> Result<MenuChoice> {
@@ -113,6 +143,7 @@ fn track(hwnd: HWND, menu: &IContextMenu) -> Result<MenuChoice> {
         let data = menu as *const IContextMenu as usize;
         let _ = SetWindowSubclass(hwnd, Some(forward_menu_messages), 1, data);
         let flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON).0;
+        show_arrow();
         let command = TrackPopupMenuEx(popup, flags, point.x, point.y, hwnd, None).0 as u32;
         let _ = RemoveWindowSubclass(hwnd, Some(forward_menu_messages), 1);
         let verb = (command >= FIRST_COMMAND).then(|| command_verb(menu, (command - FIRST_COMMAND) as usize)).flatten();
@@ -127,7 +158,10 @@ fn track(hwnd: HWND, menu: &IContextMenu) -> Result<MenuChoice> {
                 nShow: SW_SHOWNORMAL.0,
                 ..Default::default()
             };
-            menu.InvokeCommand(&info).map(|()| MenuChoice::Invoked)
+            let created = in_new_menu(menu, popup, command);
+            let result = menu.InvokeCommand(&info);
+            // 作成の後で画面の名前変更を始められず、失敗を返すことがある
+            if created { Ok(MenuChoice::Created) } else { result.map(|()| MenuChoice::Invoked) }
         } else {
             Ok(MenuChoice::None)
         };
