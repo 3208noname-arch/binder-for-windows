@@ -1,12 +1,13 @@
 //! 設定のウィンドウ。左で分類を選び、右に白い枠の行で並べる。項目を足す時は、分類の中の `section` へ行を足す。
 
-use crate::open_store;
+use crate::{explorer_backup, open_store};
 use crate::parts::{radio, slider_track, switch};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use filer_core::{
     AppSettings, MAX_DRAG_BAR_FOLDERS, MAX_FLASH_COUNT, MAX_FLASH_HOLD_MS, MAX_FLASH_MS, MAX_SPRING_MS, MIN_SPRING_MS, NewTabFolder, ScrollbarMode, snap_flash_ms, snap_spring_ms,
 };
+use filer_shell::{DefaultFiler, Restored};
 use filer_store::Store;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Stateful, Window, div, prelude::*,
@@ -75,16 +76,18 @@ enum Page {
     Tabs,
     View,
     Drag,
+    Default,
 }
 
 impl Page {
-    const ALL: [Page; 3] = [Page::Tabs, Page::View, Page::Drag];
+    const ALL: [Page; 4] = [Page::Tabs, Page::View, Page::Drag, Page::Default];
 
     fn label(self) -> &'static str {
         match self {
             Page::Tabs => "タブ",
             Page::View => "表示",
             Page::Drag => "ドラッグ",
+            Page::Default => "既定のファイラー",
         }
     }
 }
@@ -95,6 +98,11 @@ pub struct SettingsView {
     drag: Option<SliderDrag>,
     new_tab_path: Entity<TextInput>,
     page: Page,
+    /// レジストリから読んだ今の状態。読み終えるまでは `None`。
+    default_state: Option<DefaultFiler>,
+    /// 切り替えの処理が裏で動いている間は `true`。
+    default_busy: bool,
+    default_message: Option<String>,
 }
 
 fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
@@ -159,7 +167,45 @@ impl SettingsView {
             }
         })
         .detach();
-        Self { model, store: open_store(), drag: None, new_tab_path, page: Page::Tabs }
+        let mut view = Self { model, store: open_store(), drag: None, new_tab_path, page: Page::Tabs, default_state: None, default_busy: false, default_message: None };
+        view.run_default(None, cx);
+        view
+    }
+
+    /// 既定のファイラーを読む、または切り替える。レジストリと `reg.exe` を待つので、裏のスレッドで行う。
+    /// `turn_on` が `None` なら状態を読むだけにする。
+    fn run_default(&mut self, turn_on: Option<bool>, cx: &mut Context<Self>) {
+        if self.default_busy {
+            return;
+        }
+        self.default_busy = true;
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let message = match (turn_on, explorer_backup()) {
+                (None, _) => None,
+                (Some(_), None) => Some("LOCALAPPDATA が無いため、切り替えられません".to_string()),
+                (Some(true), Some(backup)) => filer_shell::set_binder_default(&exe, &backup).err().map(|error| format!("切り替えられませんでした: {error}")),
+                (Some(false), Some(backup)) => match filer_shell::restore_explorer(&backup) {
+                    Ok(Restored::FromBackup) => None,
+                    Ok(Restored::RemovedOnly) => Some("書き出したファイルが無かったため、Binderを指す値だけを消しました".to_string()),
+                    Err(error) => Some(format!("戻せませんでした: {error}")),
+                },
+            };
+            let _ = tx.send((filer_shell::default_filer_state(&exe), message));
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok((state, message)) = rx.await {
+                let _ = this.update(cx, |view, cx| {
+                    view.default_state = Some(state);
+                    view.default_message = message;
+                    view.default_busy = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     fn change(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut AppSettings)) {
@@ -247,6 +293,9 @@ impl SettingsView {
                 .child(page.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.page = page;
+                    if page == Page::Default {
+                        this.run_default(None, cx);
+                    }
                     cx.notify();
                 }))
         });
@@ -362,6 +411,38 @@ impl SettingsView {
     }
 }
 
+impl SettingsView {
+    fn default_page(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let on = self.default_state == Some(DefaultFiler::Binder);
+        let status = match &self.default_state {
+            _ if self.default_busy => "確かめています…".to_string(),
+            None => "確かめています…".to_string(),
+            Some(DefaultFiler::Explorer) => "エクスプローラーで開きます".to_string(),
+            Some(DefaultFiler::Binder) => "Binderで開きます".to_string(),
+            Some(DefaultFiler::OtherBinder(command)) => format!("別の場所のBinderを指しています（{command}）。オンにし直すと、このBinderを指します"),
+            Some(DefaultFiler::Partial) => "一部だけBinderを指しています。オンにし直すか、戻してください".to_string(),
+            Some(DefaultFiler::VerbChanged(verb)) => format!("他のアプリがフォルダの既定の動作を「{verb}」に変えたため、Binderで開きません。オンにし直すと「open」に戻します"),
+        };
+        let mut rows = vec![
+            row("default-switch")
+                .cursor(CursorStyle::PointingHand)
+                .child(div().flex_1().min_w_0().child("フォルダをBinderで開く"))
+                .child(switch(on))
+                .on_click(cx.listener(move |this, _, _, cx| this.run_default(Some(!on), cx)))
+                .into_any_element(),
+            row("default-status").child(div().flex_1().min_w_0().text_color(rgb(theme::SUB_TEXT)).child(status)).into_any_element(),
+        ];
+        if let Some(message) = &self.default_message {
+            rows.push(row("default-message").child(div().flex_1().min_w_0().child(message.clone())).into_any_element());
+        }
+        let note = r"オンにする前に、書き換えるキーを %LOCALAPPDATA%\binder\explorer-backup.reg に書き出します。オフにすると、その内容へ戻します。ごみ箱やコントロールパネルは、エクスプローラーで開きます。Win+E と、デスクトップやエクスプローラーの中でのダブルクリックは、環境によってはエクスプローラーのまま開きます。";
+        vec![
+            section("フォルダを開くアプリ", rows).into_any_element(),
+            div().px(px(theme::SETTINGS_ROW_SIDE)).text_size(px(theme::SMALL_TEXT_SIZE)).text_color(rgb(theme::SUB_TEXT)).child(note).into_any_element(),
+        ]
+    }
+}
+
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.model.read(cx).value.clone();
@@ -369,6 +450,7 @@ impl Render for SettingsView {
             Page::Tabs => self.tabs_page(&settings, cx),
             Page::View => self.view_page(&settings, cx),
             Page::Drag => self.drag_page(&settings, cx),
+            Page::Default => self.default_page(cx),
         };
         div()
             .id("settings")

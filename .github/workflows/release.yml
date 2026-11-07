@@ -1,0 +1,86 @@
+name: Release
+
+# v で始まるタグを push すると、テストしてから Zip とインストーラーを作り、下書きの Release に載せる。
+# 手で動かした時は、作ったファイルを Actions の成果物として残すだけにする。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release --workspace --exclude gpui
+
+      - name: Build
+        run: cargo build --release -p filer-ui
+
+      - name: Read the version
+        shell: pwsh
+        run: |
+          $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'filer-ui').version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match the crate version $version"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          $stage = "stage\Binder-$env:VERSION-x64"
+          New-Item $stage -ItemType Directory -Force | Out-Null
+          New-Item dist -ItemType Directory -Force | Out-Null
+          Copy-Item target\release\binder.exe, README.md, README.ja.md $stage
+          Copy-Item LICENSE "$stage\LICENSE.txt"
+          Copy-Item NOTICE "$stage\NOTICE.txt"
+          Compress-Archive "$stage\*" "dist\Binder-$env:VERSION-x64.zip"
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=$env:VERSION" installer\binder.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          $lines | Set-Content dist\SHA256SUMS.txt -Encoding utf8NoBOM
+          $notes = @(
+            "Unsigned build. See README for the SmartScreen warning.",
+            "",
+            "SHA-256:",
+            "",
+            '```'
+          ) + $lines + '```'
+          $notes | Set-Content notes.md -Encoding utf8NoBOM
+          Get-Content dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: binder-${{ env.VERSION }}
+          path: dist/*
+
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist -File).FullName --draft --title "Binder $env:VERSION" --notes-file notes.md

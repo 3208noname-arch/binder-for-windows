@@ -1,0 +1,35 @@
+Binder for Windows
+Copyright (c) 2026 Ponzu
+
+Binder for Windows is source-available under the PolyForm Noncommercial
+License 1.0.0 (see LICENSE), except for the parts listed below.
+
+--------------------------------------------------------------------------
+Apache License 2.0 parts
+--------------------------------------------------------------------------
+
+1. vendor/gpui
+
+   GPUI 0.2.2 by Zed Industries, Inc.
+   https://github.com/zed-industries/zed
+   Licensed under the Apache License, Version 2.0 (vendor/gpui/LICENSE-APACHE).
+
+   Binder modifies this copy (window appearance, input and drag-and-drop
+   handling on Windows, and the fxc.exe lookup in build.rs). The git
+   history of vendor/gpui shows the exact changes.
+
+2. crates/ui/src/text_input.rs
+
+   Based on the text input example of GPUI
+   (https://github.com/zed-industries/zed, crates/gpui/examples/input.rs),
+   Copyright Zed Industries, Inc., Apache License, Version 2.0.
+   This file, including Binder's changes to it, stays under the
+   Apache License, Version 2.0.
+
+--------------------------------------------------------------------------
+Third-party crates
+--------------------------------------------------------------------------
+
+Binder links Rust crates from crates.io (see Cargo.lock). They are under
+permissive licenses such as MIT, Apache-2.0, BSD, ISC, Zlib and Unicode-3.0.
+Their license texts are available in each crate's source package.

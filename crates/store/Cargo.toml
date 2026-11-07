@@ -2,6 +2,7 @@
 name = "filer-store"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
 
 [dependencies]
 filer-core.workspace = true

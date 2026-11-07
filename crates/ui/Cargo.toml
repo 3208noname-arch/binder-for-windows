@@ -2,9 +2,10 @@
 name = "filer-ui"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
 
 [[bin]]
-name = "filer"
+name = "binder"
 path = "src/main.rs"
 
 [dependencies]

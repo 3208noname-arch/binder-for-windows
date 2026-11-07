@@ -345,15 +345,33 @@ mod windows {
             return path.trim().to_string();
         }
 
-        // Check the default path
-        if Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe")
-            .exists()
-        {
-            return r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe"
-                .to_string();
+        // Binder: look for the newest installed Windows SDK instead of one fixed version.
+        if let Some(path) = newest_sdk_fxc() {
+            return path;
         }
 
         panic!("Failed to find fxc.exe");
+    }
+
+    /// Binder: finds `Windows Kits\10\bin\<version>\x64\fxc.exe` with the highest version.
+    fn newest_sdk_fxc() -> Option<String> {
+        let roots = ["ProgramFiles(x86)", "ProgramFiles"]
+            .iter()
+            .filter_map(|name| std::env::var_os(name))
+            .map(|root| Path::new(&root).join(r"Windows Kits\10\bin"));
+        let mut found: Vec<(Vec<u32>, std::path::PathBuf)> = Vec::new();
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(&root) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Ok(version) = name.split('.').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>() else { continue };
+                let fxc = entry.path().join(r"x64\fxc.exe");
+                if fxc.exists() {
+                    found.push((version, fxc));
+                }
+            }
+        }
+        found.into_iter().max_by(|a, b| a.0.cmp(&b.0)).map(|(_, path)| path.to_string_lossy().to_string())
     }
 
     fn compile_shader_for_module(

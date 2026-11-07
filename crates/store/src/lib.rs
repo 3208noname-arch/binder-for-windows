@@ -104,6 +104,18 @@ impl Store {
     }
 }
 
+/// 前の名前の保存先から、設定を1度だけ引き継ぐ。新しい保存先が既にあれば何もしない。
+/// 書き込み中の内容も含めて写すため、ファイルを複製せずに `VACUUM INTO` で1つのファイルへ書き出す。
+pub fn adopt_old_settings(old: &Path, new: &Path) -> rusqlite::Result<bool> {
+    if new.exists() || !old.exists() {
+        return Ok(false);
+    }
+    let connection = rusqlite::Connection::open_with_flags(old, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(std::time::Duration::from_millis(1000))?;
+    connection.execute("VACUUM INTO ?1", [new.to_string_lossy()])?;
+    Ok(true)
+}
+
 /// Windowsのパスは大文字と小文字を区別しない。
 fn key(folder: &Path) -> String {
     folder.to_string_lossy().to_lowercase()
@@ -124,6 +136,29 @@ mod tests {
         ];
         Store::open(&file).unwrap().save_favorites(&favorites).unwrap();
         assert_eq!(Store::open(&file).unwrap().favorites(), Some(favorites));
+    }
+
+    #[test]
+    fn old_settings_are_adopted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = (dir.path().join("old.sqlite"), dir.path().join("new.sqlite"));
+        let favorites = vec![Favorite::new(r"D:\素材".into())];
+        let store = Store::open(&old).unwrap();
+        store.save_favorites(&favorites).unwrap();
+        // 開いたままでも、書き込み中の内容まで写る
+        assert!(adopt_old_settings(&old, &new).unwrap());
+        drop(store);
+        assert_eq!(Store::open(&new).unwrap().favorites(), Some(favorites));
+        Store::open(&new).unwrap().save_favorites(&[]).unwrap();
+        assert!(!adopt_old_settings(&old, &new).unwrap());
+        assert_eq!(Store::open(&new).unwrap().favorites(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn nothing_is_adopted_without_old_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!adopt_old_settings(&dir.path().join("none.sqlite"), &dir.path().join("new.sqlite")).unwrap());
+        assert!(!dir.path().join("new.sqlite").exists());
     }
 
     #[test]
