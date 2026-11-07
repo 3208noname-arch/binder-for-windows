@@ -17,6 +17,10 @@ pub enum PreviewKind {
     Video,
     Audio,
     Pdf,
+    /// フォルダの中身をツリーで見せる
+    Folder,
+    /// Zipの目次をツリーで見せる
+    Archive,
     Other,
 }
 
@@ -38,7 +42,7 @@ const TEXTS: &[&str] = &[
 /// 名前の拡張子から見せ方を決める。中身は読まないので、一覧の描画から呼べる。
 pub fn preview_kind(name: &str, is_dir: bool) -> PreviewKind {
     if is_dir {
-        return PreviewKind::Other;
+        return PreviewKind::Folder;
     }
     let Some((_, extension)) = name.rsplit_once('.') else { return PreviewKind::Other };
     let extension = extension.to_ascii_lowercase();
@@ -49,6 +53,8 @@ pub fn preview_kind(name: &str, is_dir: bool) -> PreviewKind {
         PreviewKind::Audio
     } else if is(IMAGES) {
         PreviewKind::Image
+    } else if matches!(extension.as_str(), "zip" | "cbz" | "jar") {
+        PreviewKind::Archive
     } else if extension == "pdf" {
         PreviewKind::Pdf
     } else if is(TEXTS) {
@@ -163,13 +169,14 @@ mod tests {
         assert_eq!(preview_kind("a.JPG", false), PreviewKind::Image);
         assert_eq!(preview_kind("a.b.txt", false), PreviewKind::Text);
         assert_eq!(preview_kind("a.PDF", false), PreviewKind::Pdf);
+        assert_eq!(preview_kind("a.ZIP", false), PreviewKind::Archive);
         assert_eq!(preview_kind("a.exe", false), PreviewKind::Other);
         assert_eq!(preview_kind("noextension", false), PreviewKind::Other);
     }
 
     #[test]
     fn a_folder_named_like_a_video_is_not_media() {
-        assert_eq!(preview_kind("a.mp4", true), PreviewKind::Other);
+        assert_eq!(preview_kind("a.mp4", true), PreviewKind::Folder);
         assert!(!preview_kind("a.mp4", true).is_media());
     }
 

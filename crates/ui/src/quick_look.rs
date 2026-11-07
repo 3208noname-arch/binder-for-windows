@@ -4,13 +4,15 @@ use crate::browser::{Browser, window_handle};
 use crate::icon_cache::{IconCache, LARGE};
 use crate::media_view::{MediaSurface, picture_image};
 use crate::theme;
-use filer_core::{Entry, PreviewKind, fit_window, format_size, kind_of, preview_kind};
-use filer_shell::{Pdf, decode_image, fit_window_client, format_time, read_text_head, set_window_owner};
+use filer_core::{Entry, PreviewKind, Tree, build_tree, fit_window, format_size, kind_of, preview_kind, visible_lines};
+use filer_shell::{Pdf, compare_names, decode_image, fit_window_client, format_time, read_text_head, read_zip, set_window_owner, walk_folder};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, RenderImage, ScrollWheelEvent, SharedString, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowHandle, WindowKind, WindowOptions, div, img, prelude::*, px, rgb, size, uniform_list,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +25,15 @@ const PICTURE_LIMIT: u32 = 2560;
 /// 矢印キーを押し続けた間は読み始めない。
 const SETTLE: Duration = Duration::from_millis(80);
 const AUDIO_BAR: f32 = 48.;
+/// フォルダの配下を読む時間の上限。遅いNASで待たせ続けない。
+const WALK_BUDGET: Duration = Duration::from_secs(3);
+const TREE_ROW: f32 = 24.;
+const TREE_INDENT: f32 = 18.;
+const GLYPH_FONT: &str = "Segoe MDL2 Assets";
+const GLYPH_CLOSED: &str = "\u{E76C}";
+const GLYPH_OPEN: &str = "\u{E70D}";
+const GLYPH_FOLDER: &str = "\u{E8B7}";
+const GLYPH_FILE: &str = "\u{E7C3}";
 /// 絵の周りの余白
 const PICTURE_PADDING: f32 = 8.;
 /// 動画の下の操作の高さ
@@ -42,6 +53,8 @@ enum Content {
     Media { surface: Entity<MediaSurface>, audio: bool },
     /// PDF。ページの絵は開くたびに作る
     Pdf { pdf: Pdf, page: u32, image: Option<Arc<RenderImage>> },
+    /// Zipの目次やフォルダの中身
+    Tree { tree: Arc<Tree>, closed: HashSet<usize>, visible: Rc<Vec<usize>> },
     /// 中身を見せられない項目
     Info,
 }
@@ -86,6 +99,7 @@ impl QuickLook {
         let owner_handle = owner.window_handle();
         let owner_hwnd = browser.hwnd;
         let icons = browser.icons.clone();
+        let show_hidden = browser.settings.show_hidden;
         cx.open_window(options, move |window, cx| {
             cx.new(|cx| {
                 let hwnd = window_handle(window);
@@ -110,7 +124,7 @@ impl QuickLook {
                     hwnd,
                     fitted: None,
                 };
-                view.show(folder, entry, window, cx);
+                view.show(folder, entry, show_hidden, window, cx);
                 // このウィンドウが押された時にキーを受け取れるようにする。一覧のフォーカスには影響しない
                 window.focus(&view.focus);
                 view
@@ -120,7 +134,8 @@ impl QuickLook {
     }
 
     /// 見せる項目を変える。前の項目の再生と読み込みは、ここで捨てる。
-    pub fn show(&mut self, folder: PathBuf, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+    /// 開く時は一覧の更新の途中なので、一覧の設定は呼び出し側から受け取る。
+    pub fn show(&mut self, folder: PathBuf, entry: Entry, show_hidden: bool, window: &mut Window, cx: &mut Context<Self>) {
         let path = folder.join(entry.os_name());
         let kind = preview_kind(&entry.name, entry.is_dir);
         window.set_window_title(&entry.name);
@@ -150,6 +165,10 @@ impl QuickLook {
                 self.load = Some(Self::load_pdf(path, window, cx));
                 Content::Loading
             }
+            PreviewKind::Folder | PreviewKind::Archive => {
+                self.load = Some(Self::load_tree(path, kind == PreviewKind::Archive, show_hidden, window, cx));
+                Content::Loading
+            }
             PreviewKind::Other => Content::Info,
         };
         cx.notify();
@@ -164,6 +183,98 @@ impl QuickLook {
                 cx.notify();
             });
         })
+    }
+
+    fn load_tree(path: PathBuf, archive: bool, show_hidden: bool, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SETTLE).await;
+            let tree = cx
+                .background_executor()
+                .spawn(async move {
+                    let (items, cut) = if archive { read_zip(&path).ok()? } else { walk_folder(&path, show_hidden, WALK_BUDGET) };
+                    Some(build_tree(items, cut, compare_names))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.content = tree.map_or(Content::Info, |tree| {
+                    let closed = tree.initially_closed();
+                    let visible = Rc::new(visible_lines(&tree, &closed));
+                    Content::Tree { tree: Arc::new(tree), closed, visible }
+                });
+                cx.notify();
+            });
+        })
+    }
+
+    /// フォルダの行を開閉する。
+    fn toggle_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let Content::Tree { tree, closed, visible } = &mut self.content {
+            if !closed.remove(&line) {
+                closed.insert(line);
+            }
+            *visible = Rc::new(visible_lines(tree, closed));
+            cx.notify();
+        }
+    }
+
+    fn tree_row(tree: &Tree, line_index: usize, open: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let line = &tree.lines[line_index];
+        let glyph = |text: &'static str, color: u32| div().flex_none().w(px(16.)).font_family(GLYPH_FONT).text_size(px(12.)).text_color(rgb(color)).child(text);
+        let arrow = if !line.has_children {
+            ""
+        } else if open {
+            GLYPH_OPEN
+        } else {
+            GLYPH_CLOSED
+        };
+        div()
+            .id(line_index)
+            .flex()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .h(px(TREE_ROW))
+            .pl(px(12. + line.depth as f32 * TREE_INDENT))
+            .pr_3()
+            .hover(|row| row.bg(rgb(theme::HOVER)))
+            .child(glyph(arrow, theme::SUB_TEXT))
+            .child(glyph(if line.is_dir { GLYPH_FOLDER } else { GLYPH_FILE }, if line.is_dir { theme::FOLDER } else { theme::SUB_TEXT }))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(line.name.clone()))
+            .child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).text_color(rgb(theme::SUB_TEXT)).child(format_size(line.size)))
+            .when(line.has_children, |row| row.on_click(cx.listener(move |this, _, _, cx| this.toggle_line(line_index, cx))))
+    }
+
+    fn tree_view(&self, tree: Arc<Tree>, closed: &HashSet<usize>, visible: Rc<Vec<usize>>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let archive = preview_kind(&self.item.1.name, self.item.1.is_dir) == PreviewKind::Archive;
+        let mut summary = format!("{} 個のファイル、{} 個のフォルダ、{}", tree.files, tree.folders, format_size(tree.total));
+        if archive {
+            summary.push_str("（展開後）");
+        }
+        if tree.cut {
+            summary.push_str("。多いので途中までを表示しています");
+        }
+        let body = if visible.is_empty() {
+            div().flex().flex_1().items_center().justify_center().text_color(rgb(theme::SUB_TEXT)).child(if archive { "空のZipです" } else { "空のフォルダです" }).into_any_element()
+        } else {
+            let closed = closed.clone();
+            let count = visible.len();
+            let tree = tree.clone();
+            uniform_list(
+                "quick-look-tree",
+                count,
+                cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
+                    range.map(|index| Self::tree_row(&tree, visible[index], !closed.contains(&visible[index]), cx)).collect()
+                }),
+            )
+            .flex_1()
+            .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(body)
+            .child(div().flex_none().px_3().py_1().text_size(px(theme::SMALL_TEXT_SIZE)).text_color(rgb(theme::SUB_TEXT)).child(summary))
     }
 
     fn load_pdf(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
@@ -396,6 +507,10 @@ impl Render for QuickLook {
                 let (image, page, pages) = (image.clone(), *page, pdf.pages);
                 self.pdf_view(image, page, pages, cx).into_any_element()
             }
+            Content::Tree { tree, closed, visible } => {
+                let (tree, closed, visible) = (tree.clone(), closed.clone(), visible.clone());
+                self.tree_view(tree, &closed, visible, cx).into_any_element()
+            }
             Content::Info => self.info(cx).into_any_element(),
         };
         div()
@@ -464,8 +579,9 @@ impl Browser {
             return;
         }
         self.quick_look_item = Some(path);
+        let show_hidden = self.settings.show_hidden;
         cx.defer(move |cx| {
-            let _ = handle.update(cx, |view, window, cx| view.show(folder, entry, window, cx));
+            let _ = handle.update(cx, |view, window, cx| view.show(folder, entry, show_hidden, window, cx));
         });
     }
 }

@@ -3,13 +3,15 @@
 //! 再生器は1つにつき専用のスレッドで動く。開く、シーク、終了は遅いNASの上で待たされることがあるので、
 //! 描画のスレッドからは値を置くだけにする。`Player` を捨てると、スレッドが数ミリ秒で音を止める。
 
-use filer_core::{decode_text, fit_inside};
+use filer_core::{MAX_TREE_LINES, TreeItem, decode_text, fit_inside, read_zip_items};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Data::Pdf::{PdfDocument, PdfPageRenderOptions};
 use windows::Storage::StorageFile;
 use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
@@ -552,6 +554,41 @@ pub fn set_window_owner(child: isize, owner: isize) {
     }
 }
 
+/// Zipの目次を読む。止まらないよう別のスレッドから呼ぶ。
+pub fn read_zip(path: &Path) -> std::io::Result<(Vec<TreeItem>, bool)> {
+    read_zip_items(&mut File::open(path)?, decode_shift_jis)
+}
+
+/// フォルダの配下を、浅い階層から順に読む。上限か時間切れで打ち切ると真も返す。止まらないよう別のスレッドから呼ぶ。
+pub fn walk_folder(root: &Path, show_hidden: bool, budget: Duration) -> (Vec<TreeItem>, bool) {
+    const HIDDEN: u32 = 0x2;
+    let start = Instant::now();
+    let mut items = Vec::new();
+    let mut waiting = VecDeque::from([(root.to_path_buf(), String::new())]);
+    while let Some((folder, prefix)) = waiting.pop_front() {
+        // 読めないフォルダは空として扱う
+        let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+        for entry in entries.flatten() {
+            if items.len() >= MAX_TREE_LINES || start.elapsed() > budget {
+                return (items, true);
+            }
+            // 一覧の読み取りで分かる値だけを使うので、項目ごとにディスクへ行かない
+            let Ok(meta) = entry.metadata() else { continue };
+            if !show_hidden && meta.file_attributes() & HIDDEN != 0 {
+                continue;
+            }
+            let path = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            let is_dir = meta.is_dir();
+            // リンクの先は辿らない。自分を指すリンクで終わらなくなる
+            if is_dir && !meta.file_type().is_symlink() {
+                waiting.push_back((entry.path(), format!("{path}/")));
+            }
+            items.push(TreeItem { path, is_dir, size: if is_dir { 0 } else { meta.len() } });
+        }
+    }
+    (items, false)
+}
+
 /// Shift_JISとして読む。読めないバイトがあれば `None`。
 fn decode_shift_jis(bytes: &[u8]) -> Option<String> {
     const SHIFT_JIS: u32 = 932;
@@ -581,7 +618,6 @@ pub fn read_text_head(path: &Path, limit: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     fn wait_for(player: &Player, mut done: impl FnMut(&PlayerStatus) -> bool) -> PlayerStatus {
         let start = Instant::now();
@@ -741,6 +777,40 @@ startxref
         let path = dir.path().join("a.pdf");
         std::fs::write(&path, b"x").unwrap();
         assert!(Pdf::open(&path).is_err());
+    }
+
+    #[test]
+    fn walking_finds_nested_items_and_skips_hidden_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("a/b/c.txt"), b"123").unwrap();
+        let hidden = dir.path().join("h.txt");
+        std::fs::write(&hidden, b"1").unwrap();
+        let wide = HSTRING::from(hidden.as_os_str());
+        unsafe { windows::Win32::Storage::FileSystem::SetFileAttributesW(&wide, windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN).unwrap() };
+        let (mut items, cut) = walk_folder(dir.path(), false, Duration::from_secs(5));
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(!cut);
+        let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(paths, ["a", "a/b", "a/b/c.txt"]);
+        assert_eq!(items[2].size, 3);
+        let (items, _) = walk_folder(dir.path(), true, Duration::from_secs(5));
+        assert_eq!(items.len(), 4);
+    }
+
+    #[test]
+    fn walking_stops_when_time_runs_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"1").unwrap();
+        let (items, cut) = walk_folder(dir.path(), true, Duration::ZERO);
+        assert!(cut);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn walking_a_missing_folder_is_empty() {
+        let (items, cut) = walk_folder(Path::new("Z:/no/such/folder"), true, Duration::from_secs(1));
+        assert!(items.is_empty() && !cut);
     }
 
     #[test]
