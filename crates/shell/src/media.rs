@@ -630,6 +630,20 @@ mod tests {
         }
     }
 
+    /// 音声の出力先が使えるかを、短いWAVを開いて確かめる。
+    /// 音声の出力先が無い環境（CIのランナーなど）では false になり、音を出すテストは飛ばす。
+    fn audio_output_works() -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.wav");
+        std::fs::write(&path, wav(1)).unwrap();
+        let player = Player::open(path, OPTIONS, || {});
+        let ok = wait_for(&player, |status| status.ready || status.failed).ready;
+        if !ok {
+            eprintln!("音声の出力先が無いため、このテストを飛ばします");
+        }
+        ok
+    }
+
     /// 無音のPCMのWAVを作る。
     fn wav(seconds: u32) -> Vec<u8> {
         let (rate, data_len) = (8000u32, 8000 * seconds);
@@ -669,6 +683,9 @@ mod tests {
 
     #[test]
     fn a_name_with_url_characters_opens_and_reports_its_length() {
+        if !audio_output_works() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("音 #1 100%.wav");
         std::fs::write(&path, wav(2)).unwrap();
@@ -681,6 +698,9 @@ mod tests {
 
     #[test]
     fn seek_moves_the_position() {
+        if !audio_output_works() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.wav");
         std::fs::write(&path, wav(4)).unwrap();
