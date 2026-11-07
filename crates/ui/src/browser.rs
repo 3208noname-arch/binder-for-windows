@@ -1,4 +1,4 @@
-use crate::actions::{Band, Flash, RowPress, Spring, SpringTarget};
+use crate::actions::{Band, RowPress, Spring, SpringTarget};
 use crate::scrollbar::{BarFade, IconSizeDrag, ScrollDrag, ScrollTarget};
 use crate::settings_view::{SettingsModel, SettingsView};
 use crate::empty_cache::EmptyCache;
@@ -16,7 +16,7 @@ use filer_store::Store;
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
     MouseButton, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
+    WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::{HashMap, HashSet};
@@ -84,8 +84,6 @@ pub struct Browser {
     pub tab_wheel: f32,
     /// キーとマウスの呼び出し方から操作を引く表
     pub bindings: Bindings,
-    /// 移動の直前に点滅している項目
-    pub flash: Option<Flash>,
     /// ドラッグ中に前回スクロールを調べた時刻
     pub drag_tick: Option<Instant>,
     pub empties: Entity<EmptyCache>,
@@ -187,7 +185,6 @@ impl Browser {
             tab_ids: 0,
             tab_wheel: 0.,
             bindings: Bindings::default(),
-            flash: None,
             drag_tick: None,
             empties,
             keeps_session: restore,
@@ -779,6 +776,7 @@ impl Browser {
         let pinned = self.column_pinned();
         let (back, forward, up) = (self.tab.history.can_go_back() || pinned, self.tab.history.can_go_forward(), current.parent().is_some() || pinned);
         let parent_folder = current.parent().map(PathBuf::from);
+        let (back_fill, parent_fill) = (self.drag_fill(&SpringTarget::Back), self.drag_fill(&SpringTarget::Parent));
         let active = self.active_view();
         let sort = format!("並べ替え: {} ▾", active.order.key.label());
         let group = format!("グループ: {} ▾", active.group.label());
@@ -795,7 +793,9 @@ impl Browser {
             .child(
                 Self::nav_group()
                     .child(Self::nav_button("back", "‹", back).when(back, |b| {
-                        b.on_click(cx.listener(|this, _, _, cx| this.back(cx))).on_drag_move::<ExternalPaths>(cx.listener(
+                        b.on_click(cx.listener(|this, _, _, cx| this.back(cx)))
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, back_fill))
+                    .on_drag_move::<ExternalPaths>(cx.listener(
                             |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                                 this.hover_target(SpringTarget::Back, event.bounds, event.event.position, cx);
                             },
@@ -807,6 +807,7 @@ impl Browser {
             .child(Self::nav_group().child(Self::nav_button("parent", "↑", up).when(up, |b| {
                 let target = parent_folder.clone();
                 b.on_click(cx.listener(|this, _, _, cx| this.parent(cx)))
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, parent_fill))
                     .on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                         this.hover_target(SpringTarget::Parent, event.bounds, event.event.position, cx);
                     }))
@@ -855,6 +856,7 @@ impl Browser {
 
     fn sidebar_item(&self, id: String, label: String, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = self.tab.history.current() == path;
+        let fill = self.drag_fill(&SpringTarget::Go(path.clone()));
         let (hover_path, drop_path, tab_path) = (path.clone(), path.clone(), path.clone());
         div()
             .id(gpui::ElementId::Name(id.into()))
@@ -868,7 +870,7 @@ impl Browser {
             .when(active, |b| b.bg(rgb(theme::HOVER)))
             .hover(|s| s.bg(rgb(theme::HOVER)))
             .child(label)
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, fill))
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 this.hover_target(SpringTarget::Go(hover_path.clone()), event.bounds, event.event.position, cx);
             }))
@@ -877,7 +879,6 @@ impl Browser {
                 let copy = filer_shell::control_down();
                 this.drop_paths(paths.paths(), drop_path.clone(), copy, cx);
             }))
-            .when(self.flashing(&tab_path), |item| item.bg(rgb(theme::FLASH)).hover(|style| style.bg(rgb(theme::FLASH))))
             .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
                 this.item_gesture(Gesture::MiddleClick, tab_path.clone(), true, cx);
             }))
@@ -1021,7 +1022,6 @@ impl Render for Browser {
             self.drag_tick = None;
         }
         let drag_bar = dragging.then(|| self.drag_bar(cx));
-        let flash = self.flashing_view(cx).then(|| div().absolute().size_full().bg(rgba(theme::FLASH_TINT)));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
         gpui::set_drop_volume(&volume_of(self.tab.history.current()));
         div()
@@ -1060,7 +1060,7 @@ impl Render for Browser {
                     cx.notify();
                 }
             }))
-            .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().relative().flex().flex_col().flex_1().min_w_0().child(body).children(flash)))
+            .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
             .child(status)
             .children(band)
             .children(drag_bar)

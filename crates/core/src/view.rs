@@ -50,10 +50,12 @@ pub struct AppSettings {
     pub drag_bar_parent: bool,
     /// ドラッグ中の下の帯に並べる親フォルダの数
     pub drag_bar_folders: u64,
-    /// 移動やコピーの直前の点滅の間隔（ミリ秒）。0なら点滅しない
+    /// ドラッグで止まったフォルダが開く前の点滅の間隔（ミリ秒）。0なら点滅しない
     pub flash_interval_ms: u64,
-    /// 移動やコピーの直前に点滅する回数
+    /// ドラッグで止まったフォルダが開く前に点滅する回数
     pub flash_count: u64,
+    /// 開く直前の最後の青を見せる時間（ミリ秒）
+    pub flash_hold_ms: u64,
 }
 
 /// 新しいタブで開くフォルダ。
@@ -79,6 +81,8 @@ pub const MAX_SPRING_MS: u64 = 3000;
 pub const MAX_FLASH_MS: u64 = 300;
 /// 点滅の回数の上限。
 pub const MAX_FLASH_COUNT: u64 = 8;
+/// 最後の青を見せる時間の上限（ミリ秒）。
+pub const MAX_FLASH_HOLD_MS: u64 = 1500;
 /// ドラッグ中の下の帯に並べる親フォルダの数の上限。
 pub const MAX_DRAG_BAR_FOLDERS: u64 = 8;
 const SPRING_STEP_MS: u64 = 100;
@@ -115,6 +119,7 @@ impl Default for AppSettings {
             drag_bar_folders: 3,
             flash_interval_ms: 120,
             flash_count: 3,
+            flash_hold_ms: 400,
         }
     }
 }

@@ -4,7 +4,7 @@ use crate::open_store;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use filer_core::{
-    AppSettings, MAX_DRAG_BAR_FOLDERS, MAX_FLASH_COUNT, MAX_FLASH_MS, MAX_SPRING_MS, MIN_SPRING_MS, NewTabFolder, ScrollbarMode, snap_flash_ms, snap_spring_ms,
+    AppSettings, MAX_DRAG_BAR_FOLDERS, MAX_FLASH_COUNT, MAX_FLASH_HOLD_MS, MAX_FLASH_MS, MAX_SPRING_MS, MIN_SPRING_MS, NewTabFolder, ScrollbarMode, snap_flash_ms, snap_spring_ms,
 };
 use filer_store::Store;
 use gpui::{
@@ -26,6 +26,7 @@ enum Delay {
     Column,
     Flash,
     FlashCount,
+    FlashHold,
     DragFolders,
 }
 
@@ -34,6 +35,7 @@ impl Delay {
         match self {
             Delay::Flash => (0, MAX_FLASH_MS),
             Delay::FlashCount => (1, MAX_FLASH_COUNT),
+            Delay::FlashHold => (0, MAX_FLASH_HOLD_MS),
             Delay::DragFolders => (0, MAX_DRAG_BAR_FOLDERS),
             _ => (MIN_SPRING_MS, MAX_SPRING_MS),
         }
@@ -43,6 +45,7 @@ impl Delay {
         let (low, high) = self.range();
         match self {
             Delay::Flash => snap_flash_ms(value),
+            Delay::FlashHold => (((value / 10.).round() * 10.).max(0.) as u64).clamp(low, high),
             Delay::FlashCount | Delay::DragFolders => (value.round().max(0.) as u64).clamp(low, high),
             _ => snap_spring_ms(value),
         }
@@ -51,7 +54,7 @@ impl Delay {
     fn label(self, ms: u64) -> String {
         match self {
             Delay::Flash if ms == 0 => "点滅しない".to_string(),
-            Delay::Flash => format!("{ms} ミリ秒"),
+            Delay::Flash | Delay::FlashHold => format!("{ms} ミリ秒"),
             Delay::FlashCount => format!("{ms} 回"),
             Delay::DragFolders => format!("{ms} 個"),
             _ => format!("{:.1} 秒", ms as f32 / 1000.),
@@ -82,6 +85,7 @@ fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
         Delay::Column => &mut settings.spring_column_ms,
         Delay::Flash => &mut settings.flash_interval_ms,
         Delay::FlashCount => &mut settings.flash_count,
+        Delay::FlashHold => &mut settings.flash_hold_ms,
         Delay::DragFolders => &mut settings.drag_bar_folders,
     }
 }
@@ -252,9 +256,10 @@ impl Render for SettingsView {
             .child(Self::choice("wheel-tabs", "タブの帯の上のホイールで切り替える", settings.wheel_switches_tabs).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.wheel_switches_tabs = !settings.wheel_switches_tabs);
             })))
-            .child(Self::heading("ファイルの移動"))
-            .child(self.slider("flash-interval", "移動の直前の点滅の間隔", Delay::Flash, settings.flash_interval_ms, cx))
-            .child(self.slider("flash-count", "移動の直前に点滅する回数", Delay::FlashCount, settings.flash_count, cx))
+            .child(Self::heading("ドラッグで開く前の点滅"))
+            .child(self.slider("flash-interval", "点滅の間隔", Delay::Flash, settings.flash_interval_ms, cx))
+            .child(self.slider("flash-count", "点滅する回数", Delay::FlashCount, settings.flash_count, cx))
+            .child(self.slider("flash-hold", "開く直前の青の長さ", Delay::FlashHold, settings.flash_hold_ms, cx))
             .child(Self::heading("ドラッグ中の下の帯"))
             .child(Self::choice("drag-parent", "「上の階層」を出す", settings.drag_bar_parent).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.drag_bar_parent = !settings.drag_bar_parent);

@@ -334,6 +334,7 @@ impl Browser {
 
     fn tab_item(&self, tab: &Tab, active: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = tab.id;
+        let fill = self.drag_fill(&SpringTarget::Tab(id));
         let close = div()
             .id(gpui::ElementId::Name(format!("tab-close-{id}").into()))
             .flex_none()
@@ -362,18 +363,11 @@ impl Browser {
             .px_1()
             .border_r_1()
             .border_color(rgb(theme::LINE))
-            .bg(rgb(if self.flashing(&tab.folder(cx)) {
-                theme::FLASH
-            } else if active {
-                theme::BACKGROUND
-            } else {
-                theme::BAR
-            }))
-            .when(!active, |item| item.cursor(CursorStyle::PointingHand))
-            .when(!active && !self.flashing(&tab.folder(cx)), |item| item.hover(|style| style.bg(rgb(theme::HOVER))))
+            .bg(rgb(if active { theme::BACKGROUND } else { theme::BAR }))
+            .when(!active, |item| item.cursor(CursorStyle::PointingHand).hover(|style| style.bg(rgb(theme::HOVER))))
             .child(close)
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(title_of(&tab.folder(cx))))
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, fill))
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 this.hover_target(SpringTarget::Tab(id), event.bounds, event.event.position, cx);
             }))

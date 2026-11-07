@@ -11,8 +11,8 @@ use filer_shell::{
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
+    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, ScrollStrategy, Stateful, StyleRefinement, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -53,13 +53,9 @@ pub struct Spring {
     target: SpringTarget,
     /// 同じ行き先の部品が他にもあるので、どの部品の上かで見分ける
     bounds: Bounds<Pixels>,
+    /// 開く前の点滅で、青を見せている
+    blue: bool,
     _task: Task<()>,
-}
-
-/// 移動やコピーの直前に点滅している項目。
-pub struct Flash {
-    pub paths: HashSet<PathBuf>,
-    pub lit: bool,
 }
 
 /// 右クリックの「新規作成」で増える項目を待つ間の状態。
@@ -284,12 +280,10 @@ impl Browser {
     ///
     /// `band` が `Some` の時は、`grab_zone` の外を押すと範囲選択になる。
     pub fn item_mouse(&self, row: Stateful<gpui::Div>, path: PathBuf, is_dir: bool, band: Option<Option<usize>>, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
-        let drop_color = self.drop_color(&path, cx);
-        let flashing = self.flashing(&path);
+        let blue = self.spring_is_blue(&SpringTarget::Folder(path.clone()));
+        let drop_color = if blue { theme::SELECTED } else { self.drop_color(&path, cx) };
         let (press_path, menu_path, tab_path, drop_path) = (path.clone(), path.clone(), path.clone(), path);
-        // カーソルが乗っている行き先でも光るよう、マウスを乗せた時の色も替える
-        row.when(flashing, |row| row.bg(rgb(theme::FLASH)).hover(|style| style.bg(rgb(theme::FLASH))))
-            .on_mouse_down(
+        row.on_mouse_down(
             MouseButton::Middle,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -321,7 +315,7 @@ impl Browser {
         .when(is_dir, |row| {
             let (spring_path, over_path) = (drop_path.clone(), drop_path.clone());
             row.drag_over::<ExternalPaths>(move |style, paths: &ExternalPaths, _, _| {
-                if carries(paths.paths(), &over_path) { style } else { style.bg(rgb(drop_color)) }
+                if carries(paths.paths(), &over_path) { style } else { Self::drag_style(style, drop_color) }
             })
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 if !carries(event.drag(cx).paths(), &spring_path) {
@@ -447,53 +441,27 @@ impl Browser {
         let items: Vec<PathBuf> =
             paths.iter().filter(|path| path.parent() != Some(target.as_path()) && !target.starts_with(path)).cloned().collect();
         let Some(first) = items.first() else { return };
-        let flashed: HashSet<PathBuf> = items.iter().cloned().chain([target.clone()]).collect();
         let operation = if copy || !same_volume(first, &target) {
             Operation::Copy { items, destination: target }
         } else {
             Operation::Move { items, destination: target }
         };
-        self.flash_then_perform(flashed, operation, cx);
+        self.perform(operation, true, cx);
     }
 
-    /// 動く項目と行き先を点滅させてから実行する。
-    fn flash_then_perform(&mut self, paths: HashSet<PathBuf>, operation: Operation, cx: &mut Context<Self>) {
-        let interval = Duration::from_millis(self.settings.flash_interval_ms);
-        let count = self.settings.flash_count;
-        if interval.is_zero() || count == 0 {
-            self.perform(operation, true, cx);
-            return;
-        }
-        self.flash = Some(Flash { paths, lit: true });
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            // 光って消えるのを1回と数える
-            for step in 1..count * 2 {
-                cx.background_executor().timer(interval).await;
-                let _ = this.update(cx, |browser, cx| {
-                    if let Some(flash) = &mut browser.flash {
-                        flash.lit = step % 2 == 0;
-                    }
-                    cx.notify();
-                });
-            }
-            cx.background_executor().timer(interval).await;
-            let _ = this.update(cx, |browser, cx| {
-                browser.flash = None;
-                browser.perform(operation, true, cx);
-            });
-        })
-        .detach();
+    /// ドラッグが乗った部品の色。開く前の点滅の間は青と交互になる。
+    pub fn drag_fill(&self, target: &SpringTarget) -> u32 {
+        if self.spring_is_blue(target) { theme::SELECTED } else { theme::HOVER }
     }
 
-    /// 今の描画で点滅の色を出す項目か。
-    pub fn flashing(&self, path: &Path) -> bool {
-        self.flash.as_ref().is_some_and(|flash| flash.lit && flash.paths.contains(path))
+    fn spring_is_blue(&self, target: &SpringTarget) -> bool {
+        self.spring.as_ref().is_some_and(|spring| spring.blue && spring.target == *target)
     }
 
-    /// 開いている一覧そのものが行き先で、光らせる行が無い時に真。
-    pub fn flashing_view(&self, cx: &App) -> bool {
-        self.tab.columns.iter().any(|column| self.flashing(&column.pane.read(cx).state.path))
+    /// ドラッグが乗った時の見た目。青の上は文字を白くする。
+    pub fn drag_style(style: StyleRefinement, fill: u32) -> StyleRefinement {
+        let style = style.bg(rgb(fill));
+        if fill == theme::SELECTED { style.text_color(rgb(theme::SELECTED_TEXT)) } else { style }
     }
 
     /// 見えている行のフォルダが空か。分かるまでは偽。
@@ -604,7 +572,7 @@ impl Browser {
     /// ドラッグ中に、開く先の上で止まったら少し待って開く。
     pub fn hover_target(&mut self, target: SpringTarget, bounds: Bounds<Pixels>, position: Point<Pixels>, cx: &mut Context<Self>) {
         let covered = matches!(target, SpringTarget::Folder(_)) && self.over_drag_bar(position);
-        let here = matches!(target, SpringTarget::Tab(id) if self.tab_is_current(id));
+        let here = self.spring_is_done(&target, cx);
         let inside = bounds.contains(&position) && !covered && !here;
         let current = self.spring.as_ref().is_some_and(|spring| spring.target == target && spring.bounds == bounds);
         if inside == current {
@@ -612,15 +580,45 @@ impl Browser {
         }
         if !inside {
             self.spring = None;
+            cx.notify();
             return;
         }
         let delay = self.spring_delay(&target);
+        let (interval, count, hold) = (self.settings.flash_interval_ms, self.settings.flash_count, self.settings.flash_hold_ms);
         let fired = target.clone();
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(delay)).await;
+            if interval > 0 && count > 0 {
+                // 青から始めて青で終わり、最後の青だけを長く見せる
+                let last = count * 2 - 2;
+                for step in 0..=last {
+                    let _ = this.update(cx, |browser, cx| {
+                        if let Some(spring) = &mut browser.spring {
+                            spring.blue = step % 2 == 0;
+                        }
+                        cx.notify();
+                    });
+                    let wait = if step == last { hold } else { interval };
+                    cx.background_executor().timer(Duration::from_millis(wait)).await;
+                }
+            }
             let _ = this.update(cx, |browser, cx| browser.open_hovered(fired, cx));
         });
-        self.spring = Some(Spring { target, bounds, _task: task });
+        self.spring = Some(Spring { target, bounds, blue: false, _task: task });
+    }
+
+    /// 止まっても何も変わらない行き先か。開いた後に点滅を繰り返さないようにする。
+    fn spring_is_done(&self, target: &SpringTarget, cx: &Context<Self>) -> bool {
+        match target {
+            SpringTarget::Tab(id) => self.tab_is_current(*id),
+            SpringTarget::Go(path) => self.current_folder(cx) == *path,
+            SpringTarget::Folder(path) => match self.tab.view.mode {
+                ViewMode::List => self.tab.expanded.contains_key(path),
+                ViewMode::Columns => self.is_open_in_column(path, cx),
+                ViewMode::Icons => false,
+            },
+            _ => false,
+        }
     }
 
     /// 開くまでの待ち時間。開き方ごとに設定できる。
@@ -854,14 +852,14 @@ impl Browser {
         let mut ancestors: Vec<PathBuf> = current.ancestors().skip(skipped).take(settings.drag_bar_folders as usize).map(PathBuf::from).collect();
         ancestors.reverse();
         let back = (settings.drag_bar_back && self.tab.history.can_go_back())
-            .then(|| Self::drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
-        let up = parent.map(|parent| Self::drag_segment("drag-up".into(), "↑ 上の階層".into(), SpringTarget::Parent, Some(parent), cx));
+            .then(|| self.drag_segment("drag-back".into(), "‹ 戻る".into(), SpringTarget::Back, None, cx));
+        let up = parent.map(|parent| self.drag_segment("drag-up".into(), "↑ 上の階層".into(), SpringTarget::Parent, Some(parent), cx));
         let segments: Vec<_> = ancestors
             .into_iter()
             .map(|path| {
                 let label = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
                 let id = format!("drag-go-{}", path.display());
-                Self::drag_segment(id, label, SpringTarget::Go(path.clone()), Some(path), cx)
+                self.drag_segment(id, label, SpringTarget::Go(path.clone()), Some(path), cx)
             })
             .collect();
         div()
@@ -884,7 +882,8 @@ impl Browser {
             .children(segments)
     }
 
-    fn drag_segment(id: String, label: String, target: SpringTarget, drop: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
+    fn drag_segment(&self, id: String, label: String, target: SpringTarget, drop: Option<PathBuf>, cx: &mut Context<Self>) -> AnyElement {
+        let fill = self.drag_fill(&target);
         div()
             .id(gpui::ElementId::Name(id.into()))
             .flex()
@@ -902,7 +901,7 @@ impl Browser {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme::HOVER)))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, fill))
             .child(label)
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 this.hover_target(target.clone(), event.bounds, event.event.position, cx);
@@ -920,9 +919,8 @@ impl Browser {
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some((items, cut)) = clipboard_files() else { return };
         let destination = self.current_folder(cx);
-        let flashed: HashSet<PathBuf> = items.iter().cloned().chain([destination.clone()]).collect();
         let operation = if cut { Operation::Move { items, destination } } else { Operation::Copy { items, destination } };
-        self.flash_then_perform(flashed, operation, cx);
+        self.perform(operation, true, cx);
     }
 
     fn recycle_selection(&mut self, cx: &mut Context<Self>) {
