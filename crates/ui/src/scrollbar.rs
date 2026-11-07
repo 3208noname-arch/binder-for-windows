@@ -222,7 +222,7 @@ impl Browser {
     /// カーソルの下の、縦に動く一覧。
     fn scroll_target_at(&self, position: Point<Pixels>) -> Option<(ScrollTarget, Bounds<Pixels>)> {
         let fixed = |target| self.scroll_handle(target).map(|handle| (target, handle.bounds()));
-        if f32::from(position.x) < theme::SIDEBAR_WIDTH {
+        if f32::from(position.x) < self.sidebar_width() {
             return fixed(ScrollTarget::Sidebar);
         }
         match self.tab.view.mode {

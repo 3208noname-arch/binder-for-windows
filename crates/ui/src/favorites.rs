@@ -2,11 +2,12 @@
 
 use crate::actions::SpringTarget;
 use crate::browser::{Browser, Menu};
+use crate::icon_cache::SMALL;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use filer_core::{DropZone, Favorite, Gesture, add_favorites, drop_zone, place_favorites, remove_favorite, rename_favorite};
 use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, MouseButton, MouseDownEvent, Pixels, Point,
+    AnyElement, App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, MouseButton, MouseDownEvent, Pixels, Point,
     Render, Stateful, Subscription, Window, div, prelude::*, px, rgb,
 };
 use std::path::{Path, PathBuf};
@@ -24,14 +25,14 @@ pub struct FavoriteGap {
     gap: usize,
 }
 
-/// 並べ替えで運んでいる行。
-struct FavoriteDrag {
+/// 運んでいるフォルダ。行の並べ替えとタブのドラッグで使う。
+pub struct FavoriteDrag {
     path: PathBuf,
     name: String,
 }
 
 /// カーソルに付ける札。
-struct DragLabel(String);
+pub struct DragLabel(String);
 
 impl Render for DragLabel {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -142,6 +143,7 @@ impl Browser {
         let (hover_path, drop_path, tab_path, click_path) = (path.clone(), path.clone(), path.clone(), path.clone());
         div()
             .id(gpui::ElementId::Name(id.into()))
+            .flex_none()
             .px_2()
             .py_0p5()
             .rounded_md()
@@ -186,19 +188,21 @@ impl Browser {
     fn favorite_row(&self, row: usize, favorite: &Favorite, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = format!("fav-{}", favorite.path.display());
         let renaming = self.renaming_favorite(&favorite.path);
-        let label = match &self.favorite_rename {
+        let name = match &self.favorite_rename {
             Some(rename) if renaming => rename.input.clone().into_any_element(),
             _ => favorite.name.clone().into_any_element(),
         };
-        let browser = cx.weak_entity();
-        let drag = FavoriteDrag { path: favorite.path.clone(), name: favorite.name.clone() };
+        let icon = self.icons.update(cx, |icons, _| icons.folder(&favorite.path, SMALL));
+        let label = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(self.icon(icon, true, theme::SIDEBAR_ICON_SIZE))
+            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().child(name))
+            .into_any_element();
+        let (drag, drag_view) = self.favorite_drag(favorite.path.clone(), favorite.name.clone(), cx);
         self.sidebar_item(id, label, favorite.path.clone(), Some(row), cx)
-            .when(!renaming, |item| {
-                item.on_drag(drag, move |drag, _, _, cx| {
-                    let _ = browser.update(cx, |browser, _| browser.reordering_favorite = true);
-                    cx.new(|_| DragLabel(drag.name.clone()))
-                })
-            })
+            .when(!renaming, |item| item.on_drag(drag, drag_view))
             .on_drag_move::<FavoriteDrag>(cx.listener(move |this, event: &DragMoveEvent<FavoriteDrag>, _, cx| {
                 this.track_gap(GapOwner::Row(row), event.bounds, event.event.position, false, cx);
             }))
@@ -207,6 +211,21 @@ impl Browser {
                 this.menu = Some(Menu::Favorite(row, event.position));
                 cx.notify();
             }))
+    }
+
+    /// よく使う項目へ運ぶドラッグの中身と、カーソルの札を作る部品。
+    pub fn favorite_drag(
+        &self,
+        path: PathBuf,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> (FavoriteDrag, impl Fn(&FavoriteDrag, Point<Pixels>, &mut Window, &mut App) -> Entity<DragLabel> + 'static) {
+        let browser = cx.weak_entity();
+        let view = move |drag: &FavoriteDrag, _: Point<Pixels>, _: &mut Window, cx: &mut App| {
+            let _ = browser.update(cx, |browser, _| browser.reordering_favorite = true);
+            cx.new(|_| DragLabel(drag.name.clone()))
+        };
+        (FavoriteDrag { path, name }, view)
     }
 
     fn drop_favorite(&mut self, drag: &FavoriteDrag, cx: &mut Context<Self>) {
@@ -222,6 +241,7 @@ impl Browser {
         let owner = GapOwner::Heading(gap);
         div()
             .id(label)
+            .flex_none()
             .px_2()
             .pt_3()
             .pb_1()

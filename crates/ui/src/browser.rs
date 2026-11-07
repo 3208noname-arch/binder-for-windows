@@ -11,13 +11,13 @@ use crate::size_cache::SizeCache;
 use crate::tabs::Tab;
 use crate::theme;
 use filer_core::{
-    AppSettings, Bindings, Date, Entry, Favorite, Field, FolderView, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
+    AppSettings, Bindings, Date, Entry, Favorite, Field, clamp_sidebar_width, FolderView, GroupKey, SortKey, SortOrder, TabList, TabSession, ViewMode,
 };
 use filer_shell::{Operation, drive_label, drives, favorites, init_thread, preload_items_menu, today};
 use filer_store::Store;
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image,
-    MouseButton, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle, Size, Task, TitlebarOptions, UniformListScrollHandle, Window,
     WindowBounds, WindowHandle, WindowOptions, div, img, prelude::*, px, rgb, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -48,6 +48,7 @@ impl Column {
 pub enum Resize {
     Column { column: usize, start_x: f32, start_width: f32 },
     Field { index: usize, start_x: f32, start_width: f32 },
+    Sidebar { start_x: f32, start_width: f32 },
 }
 
 /// リストの見出しを押している最中の状態。動かさず離せば並べ替えになる。
@@ -293,10 +294,38 @@ impl Browser {
             model.value.show_hidden = !model.value.show_hidden;
             cx.notify();
         });
+        self.save_settings(cx);
+    }
+
+    fn save_settings(&self, cx: &Context<Self>) {
         if let Some(store) = &self.store
             && let Err(error) = store.save_app_settings(&self.settings_model.read(cx).value)
         {
             eprintln!("設定を保存できませんでした: {error}");
+        }
+    }
+
+    pub fn sidebar_width(&self) -> f32 {
+        self.settings.sidebar_width as f32
+    }
+
+    pub fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = clamp_sidebar_width(width);
+        self.settings_model.update(cx, |model, cx| {
+            model.value.sidebar_width = width;
+            cx.notify();
+        });
+    }
+
+    /// 幅のドラッグを終え、変えた幅を残す。
+    pub fn finish_resize(&mut self, cx: &mut Context<Self>) {
+        let sidebar = matches!(self.resizing, Some(Resize::Sidebar { .. }));
+        if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
+            if sidebar {
+                self.save_settings(cx);
+            } else {
+                self.save_active_view(cx);
+            }
         }
     }
 
@@ -537,9 +566,7 @@ impl Browser {
         if event.pressed_button != Some(MouseButton::Left) {
             self.press = None;
             self.scroll_drag = None;
-            if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
-                self.save_active_view(cx);
-            }
+            self.finish_resize(cx);
             self.header_drag = None;
             return;
         }
@@ -564,9 +591,7 @@ impl Browser {
             self.drag_seen = false;
             cx.notify();
         }
-        if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
-            self.save_active_view(cx);
-        }
+        self.finish_resize(cx);
         if let Some(drag) = self.header_drag.take() {
             self.drop_header(drag, cx);
         }
@@ -896,7 +921,7 @@ impl Browser {
             .flex_col()
             .flex_none()
             .h_full()
-            .w(px(theme::SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width()))
             .p_2()
             .bg(rgb(theme::SIDEBAR))
             .border_r_1()
@@ -907,6 +932,23 @@ impl Browser {
             .children(favorites)
             .child(end)
             .children(drives)
+    }
+
+    /// サイドバーの右端の、幅を変えるつまみ。
+    fn sidebar_handle(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let width = self.sidebar_width();
+        div()
+            .id("sidebar-handle")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(width - theme::SIDEBAR_HANDLE_WIDTH / 2.))
+            .w(px(theme::SIDEBAR_HANDLE_WIDTH))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.resizing = Some(Resize::Sidebar { start_x: event.position.x.into(), start_width: width });
+            }))
     }
 
     fn status(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1010,6 +1052,7 @@ impl Render for Browser {
         }
         let drag_bar = dragging.then(|| self.drag_bar(cx));
         let sidebar_bar = self.scrollbar("sidebar-bar", ScrollTarget::Sidebar, true, 0., cx);
+        let sidebar_handle = self.sidebar_handle(cx);
         gpui::set_drop_volume(&volume_of(self.tab.history.current()));
         div()
             .relative()
@@ -1047,7 +1090,16 @@ impl Render for Browser {
                     cx.notify();
                 }
             }))
-            .child(div().flex().flex_1().min_h_0().child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar)).child(div().flex().flex_col().flex_1().min_w_0().child(body)))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(div().relative().flex_none().h_full().child(sidebar).children(sidebar_bar))
+                    .child(div().flex().flex_col().flex_1().min_w_0().child(body))
+                    .child(sidebar_handle),
+            )
             .child(status)
             .children(band)
             .children(drag_bar)

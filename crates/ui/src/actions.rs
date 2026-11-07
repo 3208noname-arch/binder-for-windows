@@ -598,7 +598,7 @@ impl Browser {
     /// カーソルがドラッグ中の帯の上にあるか。帯の下の行は、隠れていても位置の上では重なる。
     fn over_drag_bar(&self, position: Point<Pixels>) -> bool {
         let top = self.viewport.height - px(theme::STATUS_HEIGHT + theme::DRAG_BAR_HEIGHT);
-        position.y >= top && position.x >= px(theme::SIDEBAR_WIDTH)
+        position.y >= top && position.x >= px(self.sidebar_width())
     }
 
     /// ドラッグ中に、開く先の上で止まったら少し待って開く。
@@ -896,7 +896,7 @@ impl Browser {
             .collect();
         div()
             .absolute()
-            .left(px(theme::SIDEBAR_WIDTH))
+            .left(px(self.sidebar_width()))
             .right_0()
             .bottom(px(theme::STATUS_HEIGHT))
             .h(px(theme::DRAG_BAR_HEIGHT))

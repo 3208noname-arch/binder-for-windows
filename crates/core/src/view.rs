@@ -15,6 +15,15 @@ pub enum ViewMode {
     Icons,
 }
 
+pub const DEFAULT_SIDEBAR_WIDTH: u64 = 190;
+pub const MIN_SIDEBAR_WIDTH: u64 = 120;
+pub const MAX_SIDEBAR_WIDTH: u64 = 480;
+
+/// ドラッグで決まった幅を、使える範囲へ収める。
+pub fn clamp_sidebar_width(width: f32) -> u64 {
+    (width.round() as u64).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
+
 /// アプリ全体の設定。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -44,6 +53,8 @@ pub struct AppSettings {
     pub new_tab_folder: NewTabFolder,
     /// `NewTabFolder::Custom` で開くフォルダ
     pub new_tab_path: String,
+    /// サイドバーの横幅
+    pub sidebar_width: u64,
     /// ドラッグ中の下の帯に「戻る」を出す
     pub drag_bar_back: bool,
     /// ドラッグ中の下の帯に「上の階層」を出す
@@ -114,6 +125,7 @@ impl Default for AppSettings {
             wheel_switches_tabs: true,
             new_tab_folder: NewTabFolder::Home,
             new_tab_path: String::new(),
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             drag_bar_back: true,
             drag_bar_parent: true,
             drag_bar_folders: 3,
@@ -320,6 +332,19 @@ pub fn fit_width<'a>(texts: impl Iterator<Item = &'a str>, font_size: f32, paddi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_width_stays_in_range() {
+        assert_eq!(clamp_sidebar_width(250.4), 250);
+        assert_eq!(clamp_sidebar_width(-30.), MIN_SIDEBAR_WIDTH);
+        assert_eq!(clamp_sidebar_width(5000.), MAX_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn settings_saved_before_the_sidebar_width_existed_get_the_default() {
+        let settings: AppSettings = serde_json::from_str(r#"{"show_hidden":true}"#).unwrap();
+        assert_eq!(settings.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+    }
 
     fn fields(view: &FolderView) -> Vec<Field> {
         view.columns.iter().map(|c| c.field).collect()

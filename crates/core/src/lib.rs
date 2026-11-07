@@ -20,7 +20,7 @@ pub use path_input::parse_path_input;
 pub use selection::Selection;
 pub use tabs::{SavedTab, TabList, TabSession};
 pub use view::{
-    AppSettings, DEFAULT_COLUMN_WIDTH, DEFAULT_ICON_SIZE, Field, FolderView, ListColumn, NewTabFolder, MAX_FIELD_WIDTH,
+    AppSettings, DEFAULT_COLUMN_WIDTH, clamp_sidebar_width, DEFAULT_ICON_SIZE, Field, FolderView, ListColumn, NewTabFolder, MAX_FIELD_WIDTH,
     MAX_DRAG_BAR_FOLDERS, MAX_FLASH_COUNT, MAX_FLASH_HOLD_MS, MAX_FLASH_MS, MAX_ICON_SIZE, MAX_SPRING_MS, MIN_FIELD_WIDTH, MIN_ICON_SIZE, MIN_SPRING_MS, ScrollbarMode, ViewMode, fit_width, rows_in_band,
     snap_flash_ms, snap_spring_ms, text_width,
 };

@@ -326,7 +326,7 @@ impl Browser {
     }
 
     pub fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let width: f32 = (window.viewport_size().width - px(theme::SIDEBAR_WIDTH + theme::GRID_SIDE_PADDING * 2.)).into();
+        let width: f32 = (window.viewport_size().width - px(self.sidebar_width() + theme::GRID_SIDE_PADDING * 2.)).into();
         let (cell_width, _) = grid_metrics(self.tab.view.icon_size);
         let per_row = ((width / (cell_width + theme::GRID_CELL_GAP)) as usize).max(1);
         self.tab.grid_per_row = per_row;

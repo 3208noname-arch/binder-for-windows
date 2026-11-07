@@ -39,6 +39,10 @@ enum Loaded {
 pub struct IconCache {
     icons: HashMap<String, Option<Arc<Image>>>,
     failures: HashMap<String, u8>,
+    /// 同じ絵のフォルダが多いので、絵の中身で1つにまとめる
+    images: HashMap<u64, Arc<Image>>,
+    /// 普通のフォルダの絵を取る先
+    plain_folder: PathBuf,
     requests: Sender<Request>,
     _receiver: Task<()>,
 }
@@ -82,13 +86,15 @@ impl IconCache {
                 }
             }
         });
-        Self { icons: HashMap::new(), failures: HashMap::new(), requests, _receiver: receiver }
+        Self { icons: HashMap::new(), failures: HashMap::new(), images: HashMap::new(), plain_folder: std::env::temp_dir(), requests, _receiver: receiver }
     }
 
     fn receive(&mut self, key: String, loaded: Loaded) {
         match loaded {
             Loaded::Done(Some(bytes)) => {
-                self.icons.insert(key, Some(Arc::new(Image::from_bytes(ImageFormat::Png, bytes))));
+                let image = Image::from_bytes(ImageFormat::Png, bytes);
+                let image = self.images.entry(image.id()).or_insert_with(|| Arc::new(image)).clone();
+                self.icons.insert(key, Some(image));
             }
             Loaded::Done(None) => {
                 let failures = self.failures.entry(key.clone()).or_default();
@@ -105,15 +111,24 @@ impl IconCache {
 
     /// 持っていれば返す。無ければ裏で取りに行き、届いたら画面を更新する。
     pub fn get(&mut self, folder: &Path, entry: &Entry, size: u32) -> Option<Arc<Image>> {
+        if entry.is_dir {
+            return self.folder(&folder.join(entry.os_name()), size);
+        }
         let extension = entry.name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
         let e = extension.as_str();
         let path = folder.join(entry.os_name());
         let thumbnail = size >= LARGE && (IMAGES.contains(&e) || VIDEOS.contains(&e));
-        let key = match (entry.is_dir, thumbnail || PER_FILE.contains(&e)) {
-            (true, _) => format!("<folder>:{size}"),
-            (false, true) => format!("{}:{size}", path.display()),
-            (false, false) => format!(".{e}:{size}"),
-        };
+        let key = if thumbnail || PER_FILE.contains(&e) { format!("{}:{size}", path.display()) } else { format!(".{e}:{size}") };
+        self.fetch(key, path, size, thumbnail)
+    }
+
+    /// フォルダの絵。フォルダごとに変えられるので1件ずつ取り、届くまでは普通のフォルダの絵を出す。
+    pub fn folder(&mut self, path: &Path, size: u32) -> Option<Arc<Image>> {
+        let own = self.fetch(format!("{}:{size}", path.display()), path.to_path_buf(), size, false);
+        own.or_else(|| self.fetch(format!("<folder>:{size}"), self.plain_folder.clone(), size, false))
+    }
+
+    fn fetch(&mut self, key: String, path: PathBuf, size: u32, thumbnail: bool) -> Option<Arc<Image>> {
         if let Some(icon) = self.icons.get(&key) {
             return icon.clone();
         }

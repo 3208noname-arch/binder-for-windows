@@ -291,9 +291,7 @@ impl Browser {
         if self.tab.renaming.take().is_some() || self.tab.search_box.is_some() {
             remove_ime_caret();
         }
-        if self.resizing.take().is_some() || self.icon_size_drag.take().is_some() {
-            self.save_active_view(cx);
-        }
+        self.finish_resize(cx);
         self.press = None;
         self.band = None;
         self.band_task = None;
@@ -339,6 +337,9 @@ impl Browser {
     fn tab_item(&self, tab: &Tab, active: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = tab.id;
         let fill = self.drag_fill(&SpringTarget::Tab(id));
+        let folder = tab.folder(cx);
+        let title = title_of(&folder);
+        let (drag, drag_view) = self.favorite_drag(folder, title.clone(), cx);
         let close = div()
             .id(gpui::ElementId::Name(format!("tab-close-{id}").into()))
             .flex_none()
@@ -370,7 +371,8 @@ impl Browser {
             .bg(rgb(if active { theme::BACKGROUND } else { theme::BAR }))
             .when(!active, |item| item.cursor(CursorStyle::PointingHand).hover(|style| style.bg(rgb(theme::HOVER))))
             .child(close)
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(title_of(&tab.folder(cx))))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(title))
+            .on_drag(drag, drag_view)
             .drag_over::<ExternalPaths>(move |style, _, _, _| Self::drag_style(style, fill))
             .on_drag_move::<ExternalPaths>(cx.listener(move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                 this.hover_target(SpringTarget::Tab(id), event.bounds, event.event.position, cx);

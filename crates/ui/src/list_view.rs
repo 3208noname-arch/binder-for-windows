@@ -147,6 +147,7 @@ impl Browser {
                 cx.notify();
             }
             Some(Resize::Column { column, start_x, start_width }) => self.resize_column_view(column, start_width + x - start_x, cx),
+            Some(Resize::Sidebar { start_x, start_width }) => self.set_sidebar_width(start_width + x - start_x, cx),
             None => {}
         }
     }
@@ -154,7 +155,7 @@ impl Browser {
     /// 窓の座標から、見出しのどの位置かを求める。
     fn header_position(&self, x: f32) -> usize {
         let offset: f32 = self.tab.list_columns_scroll.offset().x.into();
-        let mut edge = theme::SIDEBAR_WIDTH + theme::ROW_SIDE_PADDING + offset;
+        let mut edge = self.sidebar_width() + theme::ROW_SIDE_PADDING + offset;
         for (index, column) in self.tab.view.columns.iter().enumerate() {
             edge += column.width + theme::FIELD_GAP;
             if x < edge {
