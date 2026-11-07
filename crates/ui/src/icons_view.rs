@@ -6,7 +6,7 @@ use crate::theme;
 use crate::text_input::TextInput;
 use filer_core::{Date, Entry, GroupKey, MAX_ICON_SIZE, MIN_ICON_SIZE, text_width};
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, TextRun, Window, black,
+    Animation, AnimationExt, AnyElement, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, ScrollWheelEvent, TextRun, Window, black,
     deferred, div, font, linear_color_stop, linear_gradient, list, prelude::*, px, rgb,
 };
 use std::path::Path;
@@ -170,7 +170,7 @@ impl Browser {
     }
 
     /// アイコンの下の名前。3行に収まらない分は薄く消し、設定によってマウスを乗せると流す。
-    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, look: LabelLook, window: &Window) -> AnyElement {
         let width = theme::grid_label_width(self.view.icon_size);
         let lines = label_lines(&entry.name, width, window);
         if let Some(renaming) = self.renaming.as_ref().filter(|renaming| renaming.path == path) {
@@ -210,7 +210,7 @@ impl Browser {
             .w_full()
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .line_height(px(line))
-            .child(self.grab_zone(label, cx))
+            .child(label)
             .into_any_element()
     }
 
@@ -234,7 +234,7 @@ impl Browser {
             _ => theme::BACKGROUND,
         };
         let look = LabelLook { selected, highlight, fill, text: selected_text };
-        let label = self.grid_label(ix, &path, entry, look, window, cx);
+        let label = self.grid_label(ix, &path, entry, look, window);
         let label_path = path.clone();
         let cell = div()
             .id(("cell", ix))
@@ -247,6 +247,7 @@ impl Browser {
             .p_1()
             .w(px(cell_width))
             .rounded_md()
+            .cursor(CursorStyle::Arrow)
             .when(!selected, |c| c.hover(|s| s.bg(rgb(theme::HOVER))))
             .when(filled, |c| c.bg(rgb(selected_background)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -259,17 +260,12 @@ impl Browser {
                     cx.notify();
                 }
             }))
-            .child(self.grab_zone(div().flex_none().rounded_md().when(highlight, |box_| box_.bg(rgb(theme::HOVER))).child(self.item_icon(entry, icon, size)), cx))
+            .child(div().flex_none().rounded_md().when(highlight, |box_| box_.bg(rgb(theme::HOVER))).child(self.item_icon(entry, icon, size)))
             .child(label);
         let click_path = path.clone();
-        self.item_mouse(cell, path, is_dir, Some(None), cx).on_click(cx.listener(move |this, event, window, cx| {
-            if this.press_grabbed {
-                this.click_item(click_path.clone(), is_dir, event, window, cx);
-            } else if !std::mem::take(&mut this.suppress_click) {
-                // セルの余白は、一覧の余白と同じに扱う
-                this.clear_selection(cx);
-            }
-        }))
+        // ハイライトの形と掴める範囲を揃える。セルの外が範囲選択になる
+        self.item_mouse(cell, path, is_dir, None, cx)
+            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)))
     }
 
     fn grid_row(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -338,6 +334,7 @@ impl Browser {
             .relative()
             .flex_1()
             .min_h_0()
+            .cursor(CursorStyle::Crosshair)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if event.modifiers.control {
                     let notches = f32::from(event.delta.pixel_delta(px(theme::ROW_HEIGHT)).y).signum();

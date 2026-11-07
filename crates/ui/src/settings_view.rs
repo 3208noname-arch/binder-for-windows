@@ -18,6 +18,8 @@ pub struct SettingsModel {
 enum Delay {
     OpenFirst,
     OpenNext,
+    List,
+    Icons,
     Column,
 }
 
@@ -38,6 +40,8 @@ fn delay_field(settings: &mut AppSettings, delay: Delay) -> &mut u64 {
     match delay {
         Delay::OpenFirst => &mut settings.spring_first_ms,
         Delay::OpenNext => &mut settings.spring_next_ms,
+        Delay::List => &mut settings.spring_list_ms,
+        Delay::Icons => &mut settings.spring_icons_ms,
         Delay::Column => &mut settings.spring_column_ms,
     }
 }
@@ -173,9 +177,11 @@ impl Render for SettingsView {
                 }),
             )
             .child(Self::heading("ドラッグ中に開くまでの待ち時間"))
-            .child(self.slider("delay-first", "フォルダを開く（最初）", Delay::OpenFirst, settings.spring_first_ms, cx))
-            .child(self.slider("delay-next", "フォルダを開く（2回目以降）", Delay::OpenNext, settings.spring_next_ms, cx))
-            .child(self.slider("delay-column", "カラムの列を開く", Delay::Column, settings.spring_column_ms, cx))
+            .child(self.slider("delay-list", "リストのフォルダ", Delay::List, settings.spring_list_ms, cx))
+            .child(self.slider("delay-icons", "アイコンのフォルダ", Delay::Icons, settings.spring_icons_ms, cx))
+            .child(self.slider("delay-column", "カラムのフォルダ", Delay::Column, settings.spring_column_ms, cx))
+            .child(self.slider("delay-first", "帯やサイドバー（最初）", Delay::OpenFirst, settings.spring_first_ms, cx))
+            .child(self.slider("delay-next", "帯やサイドバー（2回目以降）", Delay::OpenNext, settings.spring_next_ms, cx))
             .child(Self::heading("一覧"))
             .child(Self::choice("show-hidden", "隠し項目を表示する（Ctrl+Shift+.）", settings.show_hidden).on_click(cx.listener(|this, _, _, cx| {
                 this.change(cx, |settings| settings.show_hidden = !settings.show_hidden);

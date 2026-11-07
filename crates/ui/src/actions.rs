@@ -11,7 +11,7 @@ use filer_shell::{
     set_clipboard_files, show_folder_menu, show_items_menu, unique_folder_name, valid_file_name,
 };
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
+    AnyElement, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, Pixels, Point, ScrollStrategy, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 use std::collections::{HashMap, HashSet};
@@ -216,9 +216,12 @@ impl Browser {
         }
     }
 
-    /// ファイルを掴める範囲。Finderと同じく、リストとアイコンではアイコンと名前の文字だけ。
+    /// リストでファイルを掴める範囲。行の高さいっぱいで、短い名前でも一定の幅を取る。
     pub fn grab_zone(&self, zone: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
-        zone.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.grab_press = true))
+        zone.h_full()
+            .min_w(px(theme::GRAB_MIN_WIDTH))
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.grab_press = true))
     }
 
     /// 項目の共通のマウス操作。押下の記録、右クリック、ドロップの受け入れ。
@@ -231,7 +234,6 @@ impl Browser {
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 let grabbed = std::mem::take(&mut this.grab_press);
-                this.press_grabbed = grabbed;
                 if this.renaming.as_ref().is_some_and(|renaming| renaming.path == press_path) {
                     return;
                 }
@@ -489,7 +491,11 @@ impl Browser {
     /// 開くまでの待ち時間。開き方ごとに設定できる。
     fn spring_delay(&self, target: &SpringTarget) -> u64 {
         match target {
-            SpringTarget::Folder(_) if self.view.mode == ViewMode::Columns => self.settings.spring_column_ms,
+            SpringTarget::Folder(_) => match self.view.mode {
+                ViewMode::Columns => self.settings.spring_column_ms,
+                ViewMode::List => self.settings.spring_list_ms,
+                ViewMode::Icons => self.settings.spring_icons_ms,
+            },
             _ if self.springs_done == 0 => self.settings.spring_first_ms,
             _ => self.settings.spring_next_ms,
         }

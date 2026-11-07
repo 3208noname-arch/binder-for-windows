@@ -333,6 +333,7 @@ impl Browser {
             .gap(px(theme::FIELD_GAP))
             .bg(rgb(background))
             .text_color(rgb(text))
+            .cursor(CursorStyle::Crosshair)
             .when(!selected, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
             .children(cells);
         let click_path = path.clone();
@@ -364,6 +365,7 @@ impl Browser {
             .flex_none()
             .w_full()
             .h(px(theme::ROW_HEIGHT))
+            .cursor(CursorStyle::Arrow)
             .items_center()
             .px(px(theme::ROW_SIDE_PADDING))
             .gap(px(theme::FIELD_GAP))
@@ -382,6 +384,7 @@ impl Browser {
             .min_h_0()
             .overflow_x_scroll()
             .track_scroll(&self.list_columns_scroll)
+            .cursor(CursorStyle::Crosshair)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
                 if !event.modifiers.control {

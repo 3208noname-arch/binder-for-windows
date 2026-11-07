@@ -21,10 +21,14 @@ pub enum ViewMode {
 pub struct AppSettings {
     /// アイコン表示の選択を、マウスオーバーと同じくセル全体で示す
     pub grid_selection_matches_hover: bool,
-    /// ドラッグで止まると開く時の、最初の待ち時間（ミリ秒）
+    /// 帯、サイドバー、戻るの上で止まった時の、最初の待ち時間（ミリ秒）
     pub spring_first_ms: u64,
-    /// ドラッグで止まると開く時の、2回目以降の待ち時間（ミリ秒）
+    /// 帯、サイドバー、戻るの上で止まった時の、2回目以降の待ち時間（ミリ秒）
     pub spring_next_ms: u64,
+    /// リストのフォルダの上で止まると開くまでの待ち時間（ミリ秒）
+    pub spring_list_ms: u64,
+    /// アイコンのフォルダの上で止まると開くまでの待ち時間（ミリ秒）
+    pub spring_icons_ms: u64,
     /// カラムの列を開くまでの待ち時間（ミリ秒）
     pub spring_column_ms: u64,
     /// アイコン表示の長い名前を、マウスを乗せた間に流して見せる
@@ -59,6 +63,8 @@ impl Default for AppSettings {
             grid_selection_matches_hover: true,
             spring_first_ms: 1000,
             spring_next_ms: 1500,
+            spring_list_ms: 1000,
+            spring_icons_ms: 1000,
             spring_column_ms: 500,
             scroll_long_names: true,
             scrollbar: ScrollbarMode::WhileScrolling,

@@ -250,13 +250,14 @@ impl Browser {
                     .px_2()
                     .bg(rgb(background))
                     .text_color(rgb(if active { selected_text } else { theme::TEXT }))
+                    .cursor(CursorStyle::Arrow)
                     .when(!active, |row| row.hover(|s| s.bg(rgb(theme::HOVER))))
                     .child(label)
                     .child(div().flex_1())
                     .when(is_dir, |row| row.child(div().flex_none().text_size(px(theme::SMALL_TEXT_SIZE)).child("›")));
                 let click_path = path.clone();
                 Some(
-                    // Finderのカラムは行全体を掴める。範囲選択は行の無い余白から
+                    // カラムは行全体を掴める。範囲選択は行の無い余白から
                     self.item_mouse(row, path, is_dir, None, cx)
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_column_item(column, click_path.clone(), name.clone(), entry.clone(), event, window, cx)
@@ -316,6 +317,7 @@ impl Browser {
             .h_full()
             .border_r_1()
             .border_color(rgb(theme::LINE))
+            .cursor(CursorStyle::Crosshair)
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.commit_rename(window, cx);
                 this.clear_column(column, cx);

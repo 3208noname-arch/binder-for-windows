@@ -113,8 +113,6 @@ pub struct Browser {
     pub suppress_click: bool,
     /// 今の押下が `grab_zone` の上だった
     pub grab_press: bool,
-    /// 直近の押下が `grab_zone` の上だったか。セルの余白のクリックと見分ける
-    pub press_grabbed: bool,
     pub band_task: Option<Task<()>>,
     pub scale: f32,
     pub viewport: Size<Pixels>,
@@ -220,7 +218,6 @@ impl Browser {
             soft_selection: false,
             suppress_click: false,
             grab_press: false,
-            press_grabbed: false,
             band_task: None,
             scale: window.scale_factor(),
             viewport: window.viewport_size(),
