@@ -78,6 +78,9 @@ pub const PREVIEW_PADDING: f32 = 16.0;
 pub const PREVIEW_CONTROLS: f32 = 32.0;
 pub const QUICK_LOOK_WIDTH: f32 = 800.0;
 pub const QUICK_LOOK_HEIGHT: f32 = 560.0;
+/// 中身に合わせる時の、ウィンドウの中身の上限
+pub const QUICK_LOOK_MAX_WIDTH: f32 = 960.0;
+pub const QUICK_LOOK_MAX_HEIGHT: f32 = 720.0;
 pub const INDENT: f32 = 18.0;
 pub const DISCLOSURE_WIDTH: f32 = 14.0;
 pub const GROUP_MENU_WIDTH: f32 = 220.0;

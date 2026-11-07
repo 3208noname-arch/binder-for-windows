@@ -3,15 +3,15 @@
 use crate::browser::{Browser, window_handle};
 use crate::theme;
 use filer_core::{
-    HOVER_DELAY_MS, HoverGate, PreviewKind, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, ViewMode, format_media_time, fraction_at, preview_kind,
+    HOVER_DELAY_MS, HoverGate, PreviewKind, popup_size, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, ViewMode, format_media_time, fraction_at, preview_kind,
 };
 use filer_shell::{Picture, Player, PlayerOptions, PlayerStatus};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::select;
 use gpui::{
-    Animation, AnimationExt, App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, RenderImage, Task, Window, canvas, div, img,
-    prelude::*, px, rgb, rgba,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, RenderImage, Task, Window, anchored, canvas,
+    deferred, div, img, point, prelude::*, px, rgb, rgba,
 };
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,8 @@ const UNSEEN: Duration = Duration::from_millis(400);
 /// マウスを動かした後に時刻を見せておく長さ。
 const TIME_SHOWN: Duration = Duration::from_millis(600);
 const CONTROLS_HEIGHT: f32 = 32.;
+/// ポップアップとウィンドウの端の間
+const POPUP_MARGIN: f32 = 8.;
 const GLYPH_FONT: &str = "Segoe MDL2 Assets";
 const GLYPH_PLAY: &str = "\u{E768}";
 const GLYPH_PAUSE: &str = "\u{E769}";
@@ -143,6 +145,16 @@ impl MediaSurface {
         (width > 0 && height > 0).then(|| height as f32 / width as f32)
     }
 
+    /// 動画の絵が出ていて、ポップアップにできる。
+    pub fn shows_video(&self) -> bool {
+        !self.audio && self.image.is_some()
+    }
+
+    /// マウスがウィンドウの外へ出て止まっている。
+    fn is_away(&self) -> bool {
+        self.away
+    }
+
     pub fn failed(&self) -> bool {
         self.status.failed
     }
@@ -220,7 +232,7 @@ impl MediaSurface {
         if self.player.is_some() || self.stopped || self.away {
             return;
         }
-        let options = PlayerOptions { looping: self.hover && !self.audio, muted: self.muted && (self.hover && !self.audio), autoplay: true };
+        let options = PlayerOptions { looping: self.hover && !self.audio, muted: self.muted && self.hover, autoplay: true };
         let wake = self.wake.clone();
         self.player = Some(Player::open(self.path.clone(), options, move || {
             let _ = wake.unbounded_send(());
@@ -492,6 +504,8 @@ pub struct HoverSlot {
     timer: Option<Task<()>>,
     /// キーの操作の後は、マウスを動かすまでこの項目を再生しない
     blocked: Option<PathBuf>,
+    /// マウスがポップアップの上にある。下のセルからは外れるが、再生は続ける
+    over_popup: bool,
 }
 
 impl Browser {
@@ -507,13 +521,16 @@ impl Browser {
         if self.hover_media.blocked != self.hovered_cell {
             self.hover_media.blocked = None;
         }
-        let wanted = self
-            .hovered_cell
-            .clone()
+        if self.hover_media.surface.as_ref().is_some_and(|surface| surface.read(cx).is_away()) {
+            self.hover_media.over_popup = false;
+        }
+        let hovered = if self.hover_media.over_popup { self.hover_media.path.clone() } else { self.hovered_cell.clone() };
+        let wanted = hovered
             .filter(|path| gate.allows() && self.hover_media.blocked.as_ref() != Some(path) && media_kind(path).is_some());
         if wanted != self.hover_media.path {
             self.hover_media.surface = None;
             self.hover_media.timer = None;
+            self.hover_media.over_popup = false;
             self.hover_media.path = wanted.clone();
             if let Some(path) = wanted {
                 self.hover_media.timer = Some(cx.spawn_in(window, async move |this, cx| {
@@ -534,10 +551,10 @@ impl Browser {
             return;
         }
         let Some(kind) = media_kind(&path) else { return };
-        let muted = self.settings.hover_muted;
+        let muted = self.settings.hover_silent;
         let browser = cx.entity().downgrade();
         let on_mute: MuteChanged = Rc::new(move |muted, cx| {
-            let _ = browser.update(cx, |browser, cx| browser.set_hover_muted(muted, cx));
+            let _ = browser.update(cx, |browser, cx| browser.set_hover_silent(muted, cx));
         });
         self.hover_media.surface = Some(cx.new(|cx| MediaSurface::new(path, kind, true, muted, Some(on_mute), window, cx)));
         cx.notify();
@@ -551,6 +568,42 @@ impl Browser {
     /// キーの操作の後は、マウスが動くまで今の項目を再生しない。
     pub fn block_hover(&mut self) {
         self.hover_media.blocked = self.hovered_cell.clone();
+        self.hover_media.over_popup = false;
+    }
+
+    /// 動画を大きめに見せるポップアップ。アイコンの中央に重ね、窓の外へは出さない。
+    /// セルと同じ操作を受けるので、押す、開く、掴む、右クリックはそのまま効く。
+    pub fn hover_popup(&self, surface: Entity<MediaSurface>, path: PathBuf, is_dir: bool, icon: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let aspect = surface.read(cx).aspect().filter(|_| surface.read(cx).shows_video())?;
+        let (width, height) = popup_size(aspect, icon, f32::from(self.viewport.width), f32::from(self.viewport.height));
+        let popup = div()
+            .id("hover-popup")
+            .w(px(width))
+            .h(px(height))
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(0x000000))
+            .border_1()
+            .border_color(rgb(theme::LINE))
+            .shadow_lg()
+            .occlude()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.hover_media.over_popup = *hovered;
+                cx.notify();
+            }))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                // 一覧を流す操作なので、再生をやめて下の一覧へ通す
+                this.hover_media.over_popup = false;
+                this.hovered_cell = None;
+                cx.notify();
+            }))
+            .child(surface);
+        let click_path = path.clone();
+        let popup = self
+            .item_mouse(popup, path, is_dir, None, cx)
+            .on_click(cx.listener(move |this, event, window, cx| this.click_item(click_path.clone(), is_dir, event, window, cx)));
+        let offset = point(px((icon - width) / 2.), px((icon - height) / 2.));
+        Some(deferred(anchored().offset(offset).snap_to_window_with_margin(px(POPUP_MARGIN)).child(popup)).with_priority(1).into_any_element())
     }
 
     /// カラムのプレビュー欄で再生を始める。

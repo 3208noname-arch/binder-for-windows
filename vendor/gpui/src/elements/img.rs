@@ -333,7 +333,10 @@ impl Element for Img {
                             }
 
                             let image_size = data.render_size(frame_index);
-                            style.aspect_ratio = Some(image_size.width / image_size.height);
+                            // 幅と高さの両方が決まっている時に足すと、縦長の画像が箱からはみ出す
+                            if matches!(style.size.width, Length::Auto) || matches!(style.size.height, Length::Auto) {
+                                style.aspect_ratio = Some(image_size.width / image_size.height);
+                            }
 
                             if let Length::Auto = style.size.width {
                                 style.size.width = match style.size.height {

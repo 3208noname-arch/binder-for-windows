@@ -4,8 +4,8 @@ use crate::browser::{Browser, window_handle};
 use crate::icon_cache::{IconCache, LARGE};
 use crate::media_view::{MediaSurface, picture_image};
 use crate::theme;
-use filer_core::{Entry, PreviewKind, format_size, kind_of, preview_kind};
-use filer_shell::{Pdf, decode_image, format_time, read_text_head, set_window_owner};
+use filer_core::{Entry, PreviewKind, fit_window, format_size, kind_of, preview_kind};
+use filer_shell::{Pdf, decode_image, fit_window_client, format_time, read_text_head, set_window_owner};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, RenderImage, ScrollWheelEvent, SharedString, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowHandle, WindowKind, WindowOptions, div, img, prelude::*, px, rgb, size, uniform_list,
@@ -23,6 +23,10 @@ const PICTURE_LIMIT: u32 = 2560;
 /// 矢印キーを押し続けた間は読み始めない。
 const SETTLE: Duration = Duration::from_millis(80);
 const AUDIO_BAR: f32 = 48.;
+/// 絵の周りの余白
+const PICTURE_PADDING: f32 = 8.;
+/// 動画の下の操作の高さ
+const MEDIA_CONTROLS: f32 = 32.;
 /// PDFのページの長辺の上限。文字が読める細かさにする。
 const PDF_LIMIT: u32 = 1800;
 /// ページの下の操作の高さ
@@ -53,6 +57,9 @@ pub struct QuickLook {
     watch: Option<Subscription>,
     /// ホイールの、まだページ送りに使っていない回転量
     wheel: f32,
+    hwnd: isize,
+    /// 今のウィンドウの大きさを決めた、中身の縦横と操作の高さ
+    fitted: Option<(f32, f32, f32)>,
 }
 
 /// 読んだテキストを行に分ける。長い行は切り、タブは見える幅にする。
@@ -100,6 +107,8 @@ impl QuickLook {
                     load: None,
                     watch: None,
                     wheel: 0.,
+                    hwnd,
+                    fitted: None,
                 };
                 view.show(folder, entry, window, cx);
                 // このウィンドウが押された時にキーを受け取れるようにする。一覧のフォーカスには影響しない
@@ -260,6 +269,41 @@ impl QuickLook {
         })
     }
 
+    /// 今の中身の縦横（論理ピクセルの比）と、絵の外に要る高さ。形の無い中身は決まった大きさにする。
+    fn content_shape(&self, scale: f32, cx: &App) -> (f32, f32, f32) {
+        let picture = |image: &Arc<RenderImage>, extra: f32| {
+            let size = image.size(0);
+            (i32::from(size.width) as f32 / scale, i32::from(size.height) as f32 / scale, extra)
+        };
+        match &self.content {
+            Content::Picture(image) => picture(image, PICTURE_PADDING * 2.),
+            Content::Pdf { image: Some(image), .. } => picture(image, PICTURE_PADDING * 2. + PAGE_BAR),
+            Content::Media { surface, audio: false } => match surface.read(cx).aspect() {
+                Some(aspect) => (1., aspect, MEDIA_CONTROLS),
+                None => (0., 0., 0.),
+            },
+            _ => (0., 0., 0.),
+        }
+    }
+
+    /// 中身の形が変わっていたら、ウィンドウを合わせる。
+    fn fit_to_content(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let scale = window.scale_factor();
+        let shape = self.content_shape(scale, cx);
+        if self.fitted == Some(shape) || (shape.0 <= 0. && matches!(self.content, Content::Loading)) {
+            return;
+        }
+        self.fitted = Some(shape);
+        let (width, height) = if shape.0 > 0. {
+            fit_window(shape.0, shape.1, shape.2, theme::QUICK_LOOK_MAX_WIDTH, theme::QUICK_LOOK_MAX_HEIGHT)
+        } else {
+            (theme::QUICK_LOOK_WIDTH, theme::QUICK_LOOK_HEIGHT)
+        };
+        let (hwnd, width, height) = (self.hwnd, (width * scale) as i32, (height * scale) as i32);
+        // メッセージが回るので、この更新を抜けてから動かす
+        cx.spawn(async move |_, _| fit_window_client(hwnd, width, height)).detach();
+    }
+
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = window.bounds();
         let _ = self.browser.update(cx, |browser, cx| browser.quick_look_closed(bounds, cx));
@@ -330,7 +374,8 @@ impl Focusable for QuickLook {
 }
 
 impl Render for QuickLook {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.fit_to_content(window, cx);
         let body = match &self.content {
             Content::Loading => div().size_full().into_any_element(),
             Content::Picture(image) => div().size_full().p_2().child(img(image.clone()).size_full()).into_any_element(),

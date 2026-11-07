@@ -239,6 +239,9 @@ impl Browser {
         let label = self.grid_label(ix, &path, entry, empty, look, window);
         let label_path = path.clone();
         let media = self.hover_surface(&path);
+        let popup = media.clone().and_then(|surface| self.hover_popup(surface, path.clone(), is_dir, size, cx));
+        // ポップアップにする前の、読み込みの間と音声はアイコンの上で再生する
+        let media = media.filter(|_| popup.is_none());
         let cell = div()
             .id(("cell", ix))
             .when(self.is_dimmed(&path, entry), |cell| cell.opacity(theme::CUT_OPACITY))
@@ -271,7 +274,8 @@ impl Browser {
                     .when(highlight, |box_| box_.bg(rgb(theme::HOVER)))
                     .child(self.item_icon(entry, icon, size))
                     // 最初の絵が出るまでアイコンが透けて見える
-                    .children(media.map(|surface| div().absolute().top_0().left_0().size(px(size)).child(surface))),
+                    .children(media.map(|surface| div().absolute().top_0().left_0().size(px(size)).child(surface)))
+                    .children(popup),
             )
             .child(label);
         let click_path = path.clone();

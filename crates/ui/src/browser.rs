@@ -312,10 +312,10 @@ impl Browser {
         self.save_settings(cx);
     }
 
-    /// マウスオーバーの動画の消音を、次の再生にも残す。
-    pub fn set_hover_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
+    /// マウスオーバーの消音を、次の再生にも残す。
+    pub fn set_hover_silent(&mut self, silent: bool, cx: &mut Context<Self>) {
         self.settings_model.update(cx, |model, cx| {
-            model.value.hover_muted = muted;
+            model.value.hover_silent = silent;
             cx.notify();
         });
         self.save_settings(cx);

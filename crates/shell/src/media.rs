@@ -33,7 +33,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_VERSION, MFARGB, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateFile, MFSTARTUP_FULL, MFStartup,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize};
-use windows::Win32::UI::WindowsAndMessaging::{GWLP_HWNDPARENT, SetWindowLongPtrW};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
+use windows::Win32::UI::WindowsAndMessaging::{GWLP_HWNDPARENT, GetClientRect, GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos};
 use windows::core::{BSTR, HSTRING, Interface, PCWSTR, implement};
 
 /// 映像の検査の間隔。60fpsの1コマより短くする。
@@ -518,6 +519,29 @@ fn decode_memory(bytes: &[u8]) -> windows::core::Result<Picture> {
         let mut bgra = vec![0u8; width as usize * height as usize * 4];
         converter.CopyPixels(std::ptr::null(), width * 4, &mut bgra)?;
         Ok(Picture { width, height, bgra })
+    }
+}
+
+/// ウィンドウの中身を指定の大きさ（物理ピクセル）にする。中心は保ち、画面の作業領域から出さない。
+/// メッセージが回るので、gpuiの更新処理の外で呼ぶ。
+pub fn fit_window_client(hwnd: isize, width: i32, height: i32) {
+    let hwnd = HWND(hwnd as *mut _);
+    unsafe {
+        let (mut outer, mut client) = (RECT::default(), RECT::default());
+        if GetWindowRect(hwnd, &mut outer).is_err() || GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        let total_width = width + (outer.right - outer.left) - client.right;
+        let total_height = height + (outer.bottom - outer.top) - client.bottom;
+        let mut left = (outer.left + outer.right - total_width) / 2;
+        let mut top = (outer.top + outer.bottom - total_height) / 2;
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+            let area = info.rcWork;
+            left = left.min(area.right - total_width).max(area.left);
+            top = top.min(area.bottom - total_height).max(area.top);
+        }
+        let _ = SetWindowPos(hwnd, None, left, top, total_width, total_height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 

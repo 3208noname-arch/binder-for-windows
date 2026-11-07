@@ -67,6 +67,28 @@ pub fn fit_inside(width: u32, height: u32, max_width: u32, max_height: u32) -> (
     (((width as f64 * scale).round() as u32).max(1), ((height as f64 * scale).round() as u32).max(1))
 }
 
+/// マウスオーバーのポップアップの長辺。アイコンより少し大きく、小さなアイコンでも見える大きさにする。
+const POPUP_SCALE: f32 = 1.6;
+const POPUP_MIN: f32 = 280.;
+/// ポップアップの長辺が、ウィンドウの短辺に占める割合の上限。
+const POPUP_LIMIT: f32 = 0.9;
+
+/// マウスオーバーのポップアップの大きさ。`aspect` は横に対する縦の比。
+pub fn popup_size(aspect: f32, icon: f32, viewport_width: f32, viewport_height: f32) -> (f32, f32) {
+    let long = (icon * POPUP_SCALE).max(POPUP_MIN).min(viewport_width.min(viewport_height) * POPUP_LIMIT);
+    if aspect > 1. { (long / aspect, long) } else { (long, long * aspect) }
+}
+
+/// 中身の縦横比に合わせたウィンドウの中身の大きさ。枠に収めたうえで、小さな中身は枠まで広げる。
+/// `extra` は操作の列など、絵の外に要る高さ。
+pub fn fit_window(width: f32, height: f32, extra: f32, max_width: f32, max_height: f32) -> (f32, f32) {
+    if width <= 0. || height <= 0. {
+        return (max_width, max_height);
+    }
+    let scale = (max_width / width).min((max_height - extra) / height);
+    ((width * scale).round(), (height * scale).round() + extra)
+}
+
 /// 横の位置を、0から1の割合にする。
 pub fn fraction_at(x: f32, left: f32, width: f32) -> f64 {
     if width <= 0. {
@@ -159,6 +181,29 @@ mod tests {
         assert_eq!(fit_inside(0, 50, 960, 960), (0, 0));
         assert_eq!(fit_inside(100, 50, 0, 0), (0, 0));
         assert_eq!(fit_inside(10000, 1, 100, 100), (100, 1));
+    }
+
+    #[test]
+    fn popup_is_larger_than_the_icon_and_keeps_the_shape() {
+        assert_eq!(popup_size(0.5, 96., 1000., 800.), (280., 140.));
+        assert_eq!(popup_size(2., 96., 1000., 800.), (140., 280.));
+        assert_eq!(popup_size(0.5, 256., 2000., 2000.).0, 256. * 1.6);
+    }
+
+    #[test]
+    fn popup_stays_inside_a_small_window() {
+        let (width, _) = popup_size(0.5, 256., 300., 200.);
+        assert_eq!(width, 180.);
+    }
+
+    #[test]
+    fn window_follows_the_shape_of_the_content() {
+        // 縦長は高さで、横長は幅で枠に当たる
+        assert_eq!(fit_window(1080., 1920., 0., 960., 720.), (405., 720.));
+        assert_eq!(fit_window(1920., 1080., 0., 960., 720.), (960., 540.));
+        // 小さな中身も枠まで広げ、操作の列の高さを足す
+        assert_eq!(fit_window(160., 90., 32., 960., 720.), (960., 572.));
+        assert_eq!(fit_window(0., 0., 32., 960., 720.), (960., 720.));
     }
 
     #[test]
