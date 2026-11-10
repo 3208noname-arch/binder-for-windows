@@ -185,8 +185,13 @@ fn folder_shortcut_opens_inside_the_app() {
     std::fs::create_dir(&target).unwrap();
     let file = dir.path().join("近道.lnk");
     write_shortcut(&file, &target);
-    assert_eq!(filer_shell::resolve_shortcut(&file), Some(target.clone()));
-    assert_eq!(filer_shell::open_target(&file), Ok(filer_shell::Opened::Folder(target)));
+    // TEMP が 8.3 形式の短い名前でも、ショートカットは正式な名前を返す。同じフォルダかどうかで比べる
+    let same_folder = |found: PathBuf| assert_eq!(found.canonicalize().unwrap(), target.canonicalize().unwrap());
+    same_folder(filer_shell::resolve_shortcut(&file).unwrap());
+    match filer_shell::open_target(&file) {
+        Ok(filer_shell::Opened::Folder(found)) => same_folder(found),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
