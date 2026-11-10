@@ -12,7 +12,7 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile,
     IShellItemImageFactory, KF_FLAG_DEFAULT, SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_DISPLAYNAME,
     SHGetFileInfoW, SHGetKnownFolderPath,
-    SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT,
+    SIIGBF_ICONONLY,
 };
 use windows::core::{GUID, HSTRING, PCWSTR};
 
@@ -21,14 +21,13 @@ pub fn init_thread() {
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
 }
 
-/// ファイルのアイコンかサムネイルをPNGで返す。`thumbnail` が偽ならアイコンだけを取る。
-pub fn load_icon(path: &Path, size: u32, thumbnail: bool) -> Option<Vec<u8>> {
+/// ファイルの種類のアイコンをPNGで返す。サムネイルの拡張を呼ばないよう、アイコンだけを取る。
+pub fn load_icon(path: &Path, size: u32) -> Option<Vec<u8>> {
     let side = size as i32;
-    let flags = if thumbnail { SIIGBF_RESIZETOFIT } else { SIIGBF_ICONONLY };
     let bitmap = unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
-        factory.GetImage(SIZE { cx: side, cy: side }, flags).ok()?
+        factory.GetImage(SIZE { cx: side, cy: side }, SIIGBF_ICONONLY).ok()?
     };
     let pixels = read_bitmap(bitmap);
     let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
@@ -77,7 +76,7 @@ fn read_bitmap(bitmap: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
     Some((width, height, bgra))
 }
 
-fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, width, height);
     encoder.set_color(png::ColorType::Rgba);

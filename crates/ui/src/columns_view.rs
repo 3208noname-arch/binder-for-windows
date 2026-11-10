@@ -285,7 +285,7 @@ impl Browser {
                     (false, true) => theme::STRIPE,
                     (false, false) => theme::BACKGROUND,
                 };
-                let icon = self.icons.update(cx, |icons, _| icons.get(&folder, &entry, SMALL));
+                let icon = self.icons.update(cx, |icons, cx| icons.get(&folder, &entry, SMALL, cx));
                 let name = entry.os_name().to_os_string();
                 let is_dir = entry.is_dir;
                 let empty = self.is_empty_folder(&path, &entry, cx);
@@ -451,7 +451,7 @@ impl Browser {
 
     fn preview_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let (folder, entry) = self.tab.preview.as_ref()?;
-        let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, LARGE));
+        let icon = self.icons.update(cx, |icons, cx| icons.get(folder, entry, LARGE, cx));
         let line = |label: &str, value: String| {
             div()
                 .flex()

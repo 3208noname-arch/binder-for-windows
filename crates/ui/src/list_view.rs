@@ -258,7 +258,7 @@ impl Browser {
         let expanded = self.tab.expanded.get(path);
         let note = expanded.and_then(|pane| pane.read(cx).state.note());
         let expanded = expanded.is_some();
-        let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, SMALL));
+        let icon = self.icons.update(cx, |icons, cx| icons.get(folder, entry, SMALL, cx));
         let slot = div().flex().flex_none().items_center().justify_start().w(px(theme::DISCLOSURE_WIDTH)).text_color(rgb(sub_text));
         let empty = self.is_empty_folder(path, entry, cx);
         let disclosure = if is_dir && !empty && self.tab.search_run.is_none() {

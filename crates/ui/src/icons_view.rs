@@ -224,7 +224,7 @@ impl Browser {
         let size = self.tab.view.icon_size;
         let (cell_width, _) = grid_metrics(size);
         let bucket = if size > LARGE as f32 { HUGE } else { LARGE };
-        let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, bucket));
+        let icon = self.icons.update(cx, |icons, cx| icons.get(folder, entry, bucket, cx));
         let filled = selected && whole_cell;
         let hovered = self.hovered_cell.as_deref() == Some(path.as_path());
         // 全体のハイライトを切った時は、名前だけを選択の色にする

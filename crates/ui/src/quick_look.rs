@@ -443,7 +443,7 @@ impl QuickLook {
 
     fn info(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (folder, entry) = &self.item;
-        let icon = self.icons.update(cx, |icons, _| icons.get(folder, entry, LARGE));
+        let icon = self.icons.update(cx, |icons, _| icons.get_kept(folder, entry, LARGE));
         let line = |label: &str, value: String| {
             div().flex().gap_2().text_size(px(theme::SMALL_TEXT_SIZE)).child(div().text_color(rgb(theme::SUB_TEXT)).child(label.to_string())).child(value)
         };

@@ -11,6 +11,9 @@ mod name_cmp;
 mod operations;
 mod probe;
 mod properties;
+mod thumb_pool;
+mod thumb_store;
+mod thumbnail;
 mod time;
 mod watch;
 
@@ -29,4 +32,7 @@ pub use operations::{shortcut_folder,
 };
 pub use probe::{Probed, probe_path};
 pub use properties::{PropertiesJob, read_properties, start_properties};
+pub use thumb_pool::{Thumb, ThumbJob, ThumbPool};
+pub use thumb_store::{Lookup, ThumbId, ThumbStore};
+pub use thumbnail::{Made, ThumbKind, make_thumbnail};
 pub use time::{format_time, local_date, today};
