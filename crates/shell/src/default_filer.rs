@@ -108,6 +108,15 @@ pub fn restored_backup(backup: &Path) -> PathBuf {
     backup.with_extension("restored.reg")
 }
 
+/// 既定がBinderでない時に、使わなかった書き出しを残しておく名前。同じ名前があれば番号を付けて、前のものを上書きしない。
+pub fn unused_backup(backup: &Path) -> PathBuf {
+    let first = backup.with_extension("unused.reg");
+    if !first.exists() {
+        return first;
+    }
+    (2..).map(|number| backup.with_extension(format!("unused-{number}.reg"))).find(|path| !path.exists()).unwrap_or(first)
+}
+
 /// どう戻したか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Restored {
@@ -115,23 +124,58 @@ pub enum Restored {
     FromBackup,
     /// 書き出しが無いので、Binderを指すキーだけを消した。HKLMのエクスプローラーの値が効く。
     RemovedOnly,
+    /// 既定がBinderを指していないので、書き出しを使わず、名前を変えて残した。レジストリには触っていない。
+    BackupSetAside,
 }
 
-/// 書き出した内容へ戻す。書き出しが無い時は、Binderを指すキーだけを消す。
-pub fn restore_explorer(backup: &Path) -> io::Result<Restored> {
-    if backup.exists() {
-        run_reg(&[OsStr::new("import"), backup.as_os_str()])?;
-        std::fs::rename(backup, restored_backup(backup))?;
-        notify();
-        return Ok(Restored::FromBackup);
+/// 戻す時に、書き出しをどう扱うか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestorePlan {
+    /// 書き出しを取り込む。
+    Import,
+    /// 書き出しを取り込まずに脇へ置く。古い書き出しで、今のエクスプローラーなどの設定を上書きしないため。
+    SetAside,
+    /// Binderを指すキーだけを消す。
+    RemoveBinderKeys,
+}
+
+fn restore_plan(points_to_binder: bool, backup_exists: bool) -> RestorePlan {
+    match (backup_exists, points_to_binder) {
+        (true, true) => RestorePlan::Import,
+        (true, false) => RestorePlan::SetAside,
+        (false, _) => RestorePlan::RemoveBinderKeys,
     }
-    for (value_key, remove) in [(OPEN, OPEN), (EXPLORE, EXPLORE), (WIN_E_COMMAND, WIN_E)] {
-        if read_default(value_key).is_some_and(|command| is_binder(&command)) {
-            delete_tree(remove)?;
+}
+
+/// 3か所のどれかがBinderを指すか。
+fn points_to_binder() -> bool {
+    [OPEN, EXPLORE, WIN_E_COMMAND].iter().any(|key| read_default(key).is_some_and(|command| is_binder(&command)))
+}
+
+/// 既定がBinderを指す時だけ、書き出した内容へ戻す。書き出しが無い時は、Binderを指すキーだけを消す。
+/// Binderを指していない時は、書き出しが古いかもしれないので取り込まず、名前を変えて残す。
+pub fn restore_explorer(backup: &Path) -> io::Result<Restored> {
+    match restore_plan(points_to_binder(), backup.exists()) {
+        RestorePlan::Import => {
+            run_reg(&[OsStr::new("import"), backup.as_os_str()])?;
+            std::fs::rename(backup, restored_backup(backup))?;
+            notify();
+            Ok(Restored::FromBackup)
+        }
+        RestorePlan::SetAside => {
+            std::fs::rename(backup, unused_backup(backup))?;
+            Ok(Restored::BackupSetAside)
+        }
+        RestorePlan::RemoveBinderKeys => {
+            for (value_key, remove) in [(OPEN, OPEN), (EXPLORE, EXPLORE), (WIN_E_COMMAND, WIN_E)] {
+                if read_default(value_key).is_some_and(|command| is_binder(&command)) {
+                    delete_tree(remove)?;
+                }
+            }
+            notify();
+            Ok(Restored::RemovedOnly)
         }
     }
-    notify();
-    Ok(Restored::RemovedOnly)
 }
 
 fn delete_tree(key: &str) -> io::Result<()> {
@@ -324,6 +368,29 @@ mod tests {
         let export = format!("\u{feff}{REG_HEADER}\r\n\r\n[HKEY_CURRENT_USER\\A]\r\n@=\"x\"\r\n\r\n");
         let text = backup_text(&["A", "B"], &[export, String::new()]);
         assert_eq!(text, format!("{REG_HEADER}\r\n\r\n[-HKEY_CURRENT_USER\\A]\r\n\r\n[-HKEY_CURRENT_USER\\B]\r\n\r\n[HKEY_CURRENT_USER\\A]\r\n@=\"x\"\r\n\r\n"));
+    }
+
+    #[test]
+    fn the_backup_is_imported_only_while_binder_is_the_default() {
+        assert_eq!(restore_plan(true, true), RestorePlan::Import);
+        assert_eq!(restore_plan(false, true), RestorePlan::SetAside);
+        assert_eq!(restore_plan(true, false), RestorePlan::RemoveBinderKeys);
+        assert_eq!(restore_plan(false, false), RestorePlan::RemoveBinderKeys);
+    }
+
+    #[test]
+    fn an_unused_backup_never_replaces_an_earlier_one() {
+        let folder = std::env::temp_dir().join(format!("binder-unused-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let backup = folder.join("explorer-backup.reg");
+        assert_eq!(unused_backup(&backup), folder.join("explorer-backup.unused.reg"));
+        assert_ne!(unused_backup(&backup), restored_backup(&backup));
+        std::fs::write(folder.join("explorer-backup.unused.reg"), "").unwrap();
+        assert_eq!(unused_backup(&backup), folder.join("explorer-backup.unused-2.reg"));
+        std::fs::write(folder.join("explorer-backup.unused-2.reg"), "").unwrap();
+        assert_eq!(unused_backup(&backup), folder.join("explorer-backup.unused-3.reg"));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

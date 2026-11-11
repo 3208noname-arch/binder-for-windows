@@ -189,6 +189,7 @@ impl SettingsView {
                 (Some(false), Some(backup)) => match filer_shell::restore_explorer(&backup) {
                     Ok(Restored::FromBackup) => None,
                     Ok(Restored::RemovedOnly) => Some("書き出したファイルが無かったため、Binderを指す値だけを消しました".to_string()),
+                    Ok(Restored::BackupSetAside) => Some("既定はBinderではなかったため、書き出したファイルを使わず、名前を変えて残しました".to_string()),
                     Err(error) => Some(format!("戻せませんでした: {error}")),
                 },
             };
