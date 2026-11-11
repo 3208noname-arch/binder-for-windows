@@ -413,7 +413,7 @@ impl SettingsView {
 }
 
 impl SettingsView {
-    fn default_page(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn default_page(&self, settings: &AppSettings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let on = self.default_state == Some(DefaultFiler::Binder);
         let status = match &self.default_state {
             _ if self.default_busy => "確かめています…".to_string(),
@@ -436,10 +436,15 @@ impl SettingsView {
         if let Some(message) = &self.default_message {
             rows.push(row("default-message").child(div().flex_1().min_w_0().child(message.clone())).into_any_element());
         }
-        let note = r"オンにする前に、書き換えるキーを %LOCALAPPDATA%\binder\explorer-backup.reg に書き出します。オフにすると、その内容へ戻します。ごみ箱やコントロールパネルは、エクスプローラーで開きます。Win+E と、デスクトップやエクスプローラーの中でのダブルクリックは、環境によってはエクスプローラーのまま開きます。";
+        let note: &'static str = r"オンにする前に、書き換えるキーを %LOCALAPPDATA%\binder\explorer-backup.reg に書き出します。オフにすると、その内容へ戻します。ごみ箱やコントロールパネルは、エクスプローラーで開きます。Win+E と、デスクトップやエクスプローラーの中でのダブルクリックは、環境によってはエクスプローラーのまま開きます。";
+        let dialog_note = "アプリの「開く」「保存」の画面は、エクスプローラーではなくそのアプリの中に出るので、上のスイッチでは変わりません。オンにすると、その画面が前面にある時に Ctrl+Alt+B を押すと、Binderで最後に操作した窓のフォルダへ移ります。管理者権限のアプリの画面や、独自の画面のアプリでは動きません。";
+        let dialog_rows = vec![self.toggle("dialog-sync", "「開く」「保存」の画面を、Binderのフォルダへ移す（Ctrl+Alt+B）", settings.dialog_sync, |settings| settings.dialog_sync = !settings.dialog_sync, cx)];
+        let small = |text: &'static str| div().px(px(theme::SETTINGS_ROW_SIDE)).text_size(px(theme::SMALL_TEXT_SIZE)).text_color(rgb(theme::SUB_TEXT)).child(text).into_any_element();
         vec![
             section("フォルダを開くアプリ", rows).into_any_element(),
-            div().px(px(theme::SETTINGS_ROW_SIDE)).text_size(px(theme::SMALL_TEXT_SIZE)).text_color(rgb(theme::SUB_TEXT)).child(note).into_any_element(),
+            small(note),
+            section("「開く」「保存」の画面", dialog_rows).into_any_element(),
+            small(dialog_note),
         ]
     }
 }
@@ -451,7 +456,7 @@ impl Render for SettingsView {
             Page::Tabs => self.tabs_page(&settings, cx),
             Page::View => self.view_page(&settings, cx),
             Page::Drag => self.drag_page(&settings, cx),
-            Page::Default => self.default_page(cx),
+            Page::Default => self.default_page(&settings, cx),
         };
         div()
             .id("settings")

@@ -1048,6 +1048,10 @@ pub fn saved_view(store: &Option<Store>, path: &Path) -> Option<FolderView> {
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_active = window.is_window_active();
+        filer_shell::set_dialog_sync(self.settings.dialog_sync);
+        if self.window_active {
+            filer_shell::publish_dialog_folder(&self.tab.folder(cx));
+        }
         self.scale = window.scale_factor();
         self.viewport = window.viewport_size();
         self.sync_media(window, cx);

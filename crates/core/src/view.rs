@@ -53,6 +53,8 @@ pub struct AppSettings {
     pub focus_new_tabs: bool,
     /// タブの帯の上のホイールでタブを切り替える
     pub wheel_switches_tabs: bool,
+    /// 標準の「開く」「保存」ダイアログを、Ctrl+Alt+Bで今のフォルダへ移す
+    pub dialog_sync: bool,
     /// 新しいタブで開くフォルダ
     pub new_tab_folder: NewTabFolder,
     /// `NewTabFolder::Custom` で開くフォルダ
@@ -129,6 +131,7 @@ impl Default for AppSettings {
             show_hidden: false,
             focus_new_tabs: false,
             wheel_switches_tabs: true,
+            dialog_sync: false,
             new_tab_folder: NewTabFolder::Home,
             new_tab_path: String::new(),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,

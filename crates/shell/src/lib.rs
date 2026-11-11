@@ -2,6 +2,7 @@
 
 mod context_menu;
 mod default_filer;
+mod dialog_sync;
 mod enumerate;
 mod icons;
 mod media;
@@ -19,6 +20,7 @@ mod watch;
 
 pub use context_menu::{MenuChoice, drag_items, preload_items_menu, show_folder_menu, show_items_menu};
 pub use default_filer::{DefaultFiler, clean_argument, default_filer_state, forward_to_explorer, can_open, Restored, restore_explorer, restored_backup, set_binder_default};
+pub use dialog_sync::{publish_folder as publish_dialog_folder, send_to_foreground_dialog, set_enabled as set_dialog_sync};
 pub use drag_wheel::{take_wheel, watch_wheel};
 pub use ime::{control_down, cursor_position, left_button_down, place_ime_caret, remove_ime_caret};
 pub use watch::{WatchJob, watch_folder};
