@@ -1,0 +1,2 @@
+// binder.exe のリソース。gpui は ID 1 のアイコンをウィンドウとタスクバーに使う
+1 ICON "../../assets/icon/binder.ico"

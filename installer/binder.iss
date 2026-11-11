@@ -24,6 +24,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+SetupIconFile=..\assets\icon\binder.ico
 UninstallDisplayIcon={app}\binder.exe
 UninstallDisplayName=Binder
 CloseApplications=yes

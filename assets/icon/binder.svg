@@ -1,0 +1,10 @@
+<!-- Binder のアプリアイコン（40 px 以上で使う）。色は crates/ui/src/theme.rs の SELECTED と SELECTED_DROP -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3f8ff0"/><stop offset="1" stop-color="#0a64d8"/></linearGradient>
+<clipPath id="c"><rect x="24" y="16" width="208" height="224" rx="40"/></clipPath></defs>
+<rect x="24" y="16" width="208" height="224" rx="40" fill="url(#g)"/>
+<rect x="24" y="16" width="56" height="224" fill="#0848a0" clip-path="url(#c)"/>
+<rect x="112" y="56" width="88" height="44" rx="10" fill="#fff" opacity="0.92"/>
+<g fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round">
+<path d="M56 72 H100"/><path d="M56 128 H100"/><path d="M56 184 H100"/></g>
+</svg>

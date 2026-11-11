@@ -1,0 +1,10 @@
+[package]
+name = "icongen"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish = false
+
+[dependencies]
+resvg = { version = "0.45", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }

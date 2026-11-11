@@ -1,0 +1,10 @@
+<!-- Binder のアプリアイコン（32 px 以下で使う）。16 px の画素に合わせ、角丸を小さく、リングを 1 px の帯にした -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3f8ff0"/><stop offset="1" stop-color="#0a64d8"/></linearGradient></defs>
+<rect x="1" y="1" width="14" height="15" rx="2" fill="url(#g)" shape-rendering="geometricPrecision"/>
+<path d="M3 1 h1 v15 h-1 a2 2 0 0 1 -2 -2 v-11 a2 2 0 0 1 2 -2z" fill="#0848a0" shape-rendering="geometricPrecision"/>
+<rect x="8" y="3" width="5" height="3" fill="#fff"/>
+<rect x="2" y="4" width="5" height="1" fill="#fff"/>
+<rect x="2" y="8" width="5" height="1" fill="#fff"/>
+<rect x="2" y="12" width="5" height="1" fill="#fff"/>
+</svg>

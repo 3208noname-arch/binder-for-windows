@@ -1678,6 +1678,7 @@ dependencies = [
 name = "filer-ui"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "filer-core",
  "filer-shell",
  "filer-store",
@@ -2624,6 +2625,14 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "icongen"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "resvg",
 ]
 
 [[package]]
