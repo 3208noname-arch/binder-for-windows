@@ -4,9 +4,10 @@ use crate::browser::{Browser, window_handle};
 use crate::icon_cache::{IconCache, LARGE};
 use crate::media_view::{MediaSurface, picture_image};
 use crate::parts::{Icon, icon};
+use crate::picture_view::PictureView;
 use crate::theme;
-use filer_core::{Entry, PreviewKind, Tree, build_tree, fit_window, format_size, kind_of, preview_kind, visible_lines};
-use filer_shell::{Pdf, compare_names, decode_image, fit_window_client, format_time, read_text_head, read_zip, set_window_owner, walk_folder};
+use filer_core::{Command, Entry, PreviewKind, Tree, build_tree, fit_window, format_size, kind_of, preview_kind, visible_lines};
+use filer_shell::{Pdf, compare_names, decode_image_sized, fit_window_client, format_time, read_text_head, read_zip, set_window_owner, walk_folder};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, RenderImage, ScrollWheelEvent, SharedString, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowHandle, WindowKind, WindowOptions, div, img, prelude::*, px, rgb, size, uniform_list,
@@ -49,7 +50,7 @@ const WHEEL_PAGE: f32 = 60.;
 enum Content {
     /// 読んでいる途中
     Loading,
-    Picture(Arc<RenderImage>),
+    Picture(Entity<PictureView>),
     Text { lines: Arc<Vec<SharedString>>, cut: bool },
     Media { surface: Entity<MediaSurface>, audio: bool },
     /// PDF。ページの絵は開くたびに作る
@@ -142,11 +143,9 @@ impl QuickLook {
         window.set_window_title(&entry.name);
         self.item = (folder, entry);
         self.load = None;
-        match &mut self.content {
-            Content::Picture(image) => window.drop_image(image.clone()).ok(),
-            Content::Pdf { image, .. } => image.take().and_then(|image| window.drop_image(image).ok()),
-            _ => None,
-        };
+        if let Content::Pdf { image: Some(image), .. } = &mut self.content {
+            window.drop_image(image.clone()).ok();
+        }
         self.content = match kind {
             PreviewKind::Video | PreviewKind::Audio => {
                 let surface = cx.new(|cx| MediaSurface::new(path, kind, false, false, None, window, cx));
@@ -178,9 +177,13 @@ impl QuickLook {
     fn load_picture(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SETTLE).await;
-            let picture = cx.background_executor().spawn(async move { decode_image(&path, PICTURE_LIMIT, PICTURE_LIMIT) }).await;
+            let decode_path = path.clone();
+            let picture = cx.background_executor().spawn(async move { decode_image_sized(&decode_path, PICTURE_LIMIT, PICTURE_LIMIT) }).await;
             let _ = this.update(cx, |this, cx| {
-                this.content = picture.ok().and_then(picture_image).map_or(Content::Info, Content::Picture);
+                this.content = match picture.ok().and_then(|(picture, source)| Some((picture_image(picture)?, source))) {
+                    Some((image, source)) => Content::Picture(cx.new(|cx| PictureView::new(path, image, source, cx))),
+                    None => Content::Info,
+                };
                 cx.notify();
             });
         })
@@ -387,7 +390,7 @@ impl QuickLook {
             (i32::from(size.width) as f32 / scale, i32::from(size.height) as f32 / scale, extra)
         };
         match &self.content {
-            Content::Picture(image) => picture(image, PICTURE_PADDING * 2.),
+            Content::Picture(view) => picture(view.read(cx).base_image(), PICTURE_PADDING * 2.),
             Content::Pdf { image: Some(image), .. } => picture(image, PICTURE_PADDING * 2. + PAGE_BAR),
             Content::Media { surface, audio: false } => match surface.read(cx).aspect() {
                 Some(aspect) => (1., aspect, MEDIA_CONTROLS),
@@ -421,13 +424,48 @@ impl QuickLook {
         window.remove_window();
     }
 
+    /// 再生中の動画か音声。Spaceはこれの再生と一時停止になる。
+    pub fn playing_media(&self, cx: &App) -> Option<Entity<MediaSurface>> {
+        match &self.content {
+            Content::Media { surface, .. } if !surface.read(cx).failed() => Some(surface.clone()),
+            _ => None,
+        }
+    }
+
+    /// 再生と拡大の操作。今の中身に合わない操作は何もしない。
+    pub fn run(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.content {
+            Content::Media { surface, .. } => surface.update(cx, |surface, cx| match command {
+                Command::FrameBack => surface.step_frames(-1, cx),
+                Command::FrameForward => surface.step_frames(1, cx),
+                Command::FramesBack => surface.step_frames(-10, cx),
+                Command::FramesForward => surface.step_frames(10, cx),
+                Command::SkipBack => surface.skip(-1., false, cx),
+                Command::SkipForward => surface.skip(1., false, cx),
+                Command::Slower => surface.change_speed(false, cx),
+                Command::Faster => surface.change_speed(true, cx),
+                _ => {}
+            }),
+            Content::Picture(view) => view.update(cx, |view, cx| match command {
+                Command::ZoomIn => view.zoom(true, window, cx),
+                Command::ZoomOut => view.zoom(false, window, cx),
+                Command::ZoomToggle => view.toggle(window, cx),
+                Command::ZoomActual => view.actual_size(window, cx),
+                Command::ZoomFit => view.fit(window, cx),
+                _ => {}
+            }),
+            _ => {}
+        }
+    }
+
     /// このウィンドウを押した後も、矢印キーなどは一覧の操作として働かせる。
+    /// Spaceも一覧に渡し、再生中なら再生と一時停止、それ以外なら閉じる判断を一覧の側に任せる。
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.is_held && matches!(event.keystroke.key.as_str(), "space" | "escape") {
+        if event.is_held && event.keystroke.key == "escape" {
             return;
         }
         match event.keystroke.key.as_str() {
-            "space" | "escape" => return self.close(window, cx),
+            "escape" => return self.close(window, cx),
             "pageup" => return self.turn_page(-1, window, cx),
             "pagedown" => return self.turn_page(1, window, cx),
             _ => {}
@@ -489,7 +527,7 @@ impl Render for QuickLook {
         self.fit_to_content(window, cx);
         let body = match &self.content {
             Content::Loading => div().size_full().into_any_element(),
-            Content::Picture(image) => div().size_full().p_2().child(img(image.clone()).size_full()).into_any_element(),
+            Content::Picture(view) => div().size_full().p_2().child(view.clone()).into_any_element(),
             Content::Text { lines, cut } => Self::text_view(lines.clone(), *cut).into_any_element(),
             Content::Media { surface, audio } if *audio || surface.read(cx).failed() => {
                 let surface = surface.clone();
@@ -532,8 +570,17 @@ impl Browser {
         self.find_entry(&path, cx).map(|entry| (path.parent().unwrap_or(&path).to_path_buf(), entry))
     }
 
-    /// スペースキー。開いていれば閉じる。
+    /// スペースキー。動画か音声を見せていれば再生と一時停止、それ以外で開いていれば閉じる。
     pub fn toggle_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(surface) = self.quick_look.and_then(|handle| handle.read(cx).ok()?.playing_media(cx)) {
+            surface.update(cx, |surface, cx| surface.toggle_play(cx));
+            return true;
+        }
+        self.close_quick_look(window, cx) || self.open_quick_look(window, cx)
+    }
+
+    /// 開いていれば閉じる。
+    pub fn close_quick_look(&mut self, _: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Some(handle) = self.quick_look.take() {
             let closed = handle.update(cx, |_, window, _| {
                 let bounds = window.bounds();
@@ -545,10 +592,23 @@ impl Browser {
             cx.notify();
             return true;
         }
+        false
+    }
+
+    fn open_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some((folder, entry)) = self.quick_look_target(cx) else { return false };
         self.quick_look_item = Some(folder.join(entry.os_name()));
         self.quick_look = QuickLook::open(self, folder, entry, window, cx);
         cx.notify();
+        true
+    }
+
+    /// 再生と拡大の操作をクイックルックへ渡す。開いていなければ何もしない。
+    pub fn quick_look_command(&mut self, command: Command, cx: &mut Context<Self>) -> bool {
+        let Some(handle) = self.quick_look else { return false };
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |view, window, cx| view.run(command, window, cx));
+        });
         true
     }
 

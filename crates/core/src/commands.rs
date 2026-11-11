@@ -35,13 +35,32 @@ pub enum Command {
     PreviousTab,
     OpenInNewTab,
     EditPath,
+    /// クイックルックの再生。1コマ、10コマ、長さの2%ずつ動く
+    FrameBack,
+    FrameForward,
+    FramesBack,
+    FramesForward,
+    SkipBack,
+    SkipForward,
+    Slower,
+    Faster,
+    /// クイックルックの画像の拡大
+    ZoomIn,
+    ZoomOut,
+    /// 枠に合わせると等倍を往復する
+    ZoomToggle,
+    ZoomActual,
+    ZoomFit,
 }
 
 impl Command {
     /// キーの押しっぱなしで繰り返すか。
     pub fn repeats(self) -> bool {
         use Command::*;
-        matches!(self, MoveUp | MoveDown | MoveLeft | MoveRight | ExtendUp | ExtendDown | ExtendLeft | ExtendRight)
+        matches!(
+            self,
+            MoveUp | MoveDown | MoveLeft | MoveRight | ExtendUp | ExtendDown | ExtendLeft | ExtendRight | FrameBack | FrameForward | FramesBack | FramesForward | SkipBack | SkipForward | ZoomIn | ZoomOut
+        )
     }
 
     /// 名前の入力中や検索欄の中でも効くか。
@@ -115,6 +134,23 @@ impl Default for Bindings {
             ("w", true, false, false, CloseTab),
             ("tab", true, false, false, NextTab),
             ("tab", true, true, false, PreviousTab),
+            // gpuiはShiftで打つ記号を、その記号として届ける（Shift+[ は「{」）
+            ("[", false, false, false, FrameBack),
+            ("]", false, false, false, FrameForward),
+            ("{", false, false, false, FramesBack),
+            ("}", false, false, false, FramesForward),
+            ("left", true, false, false, SkipBack),
+            ("right", true, false, false, SkipForward),
+            ("<", false, false, false, Slower),
+            (">", false, false, false, Faster),
+            ("+", false, false, false, ZoomIn),
+            ("+", true, false, false, ZoomIn),
+            ("=", true, false, false, ZoomIn),
+            ("-", false, false, false, ZoomOut),
+            ("-", true, false, false, ZoomOut),
+            ("`", false, false, false, ZoomToggle),
+            ("0", true, false, false, ZoomActual),
+            ("9", true, false, false, ZoomFit),
         ];
         let keys = KEYS.iter().map(|&(key, control, shift, alt, command)| (Chord::new(key, control, shift, alt), command)).collect();
         let gestures = vec![(Gesture::MiddleClick, OpenInNewTab), (Gesture::ControlDoubleClick, OpenInNewTab)];
@@ -182,6 +218,21 @@ mod tests {
         assert_eq!(bindings.key(&Chord::new("space", false, false, false)), Some(Command::QuickLook));
         assert!(!Command::QuickLook.works_while_typing());
         assert!(!Command::QuickLook.repeats());
+    }
+
+    #[test]
+    fn quick_look_keys_follow_eagle() {
+        let bindings = Bindings::default();
+        let key = |key: &str, control: bool| bindings.key(&Chord::new(key, control, false, false));
+        assert_eq!(key("]", false), Some(Command::FrameForward));
+        assert_eq!(key("{", false), Some(Command::FramesBack));
+        assert_eq!(key("left", true), Some(Command::SkipBack));
+        assert_eq!(key(">", false), Some(Command::Faster));
+        assert_eq!(key(">", true), Some(Command::ToggleHidden));
+        assert_eq!(key("`", false), Some(Command::ZoomToggle));
+        assert_eq!(key("0", true), Some(Command::ZoomActual));
+        assert!(Command::FrameForward.repeats());
+        assert!(!Command::Faster.repeats());
     }
 
     #[test]

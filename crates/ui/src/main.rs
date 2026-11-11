@@ -14,6 +14,7 @@ mod list_tree;
 mod list_view;
 mod media_view;
 mod parts;
+mod picture_view;
 mod path_bar;
 mod quick_look;
 mod scrollbar;

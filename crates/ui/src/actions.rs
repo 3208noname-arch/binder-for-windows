@@ -1103,6 +1103,20 @@ impl Browser {
         let rows = if mode == ViewMode::Icons { self.tab.grid_per_row as isize } else { 1 };
         match command {
             Command::QuickLook => return self.toggle_quick_look(window, cx),
+            Command::FrameBack
+            | Command::FrameForward
+            | Command::FramesBack
+            | Command::FramesForward
+            | Command::SkipBack
+            | Command::SkipForward
+            | Command::Slower
+            | Command::Faster
+            | Command::ZoomIn
+            | Command::ZoomOut
+            | Command::ZoomToggle
+            | Command::ZoomActual
+            | Command::ZoomFit => return self.quick_look_command(command, cx),
+            Command::Cancel if self.quick_look.is_some() => return self.close_quick_look(window, cx),
             Command::Parent => self.parent(cx),
             Command::Back => self.back(cx),
             Command::Forward => self.forward(cx),

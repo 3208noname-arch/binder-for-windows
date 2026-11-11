@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEngine, IMFMediaEngineClassFactory, IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
-    MF_ACCESSMODE_READ, MF_FILEFLAGS_NONE, MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_SEEK_MODE_APPROXIMATE,
+    MF_ACCESSMODE_READ, MF_FILEFLAGS_NONE, MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_SEEK_MODE_APPROXIMATE, MF_MEDIA_ENGINE_SEEK_MODE_NORMAL,
     MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_VERSION, MFARGB, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateFile, MFSTARTUP_FULL, MFStartup,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize};
@@ -64,6 +64,10 @@ pub struct PlayerStatus {
     pub video_size: (u32, u32),
     pub position: f64,
     pub duration: f64,
+    /// 再生の速度
+    pub rate: f64,
+    /// 測った1コマの時間（秒）。まだ測れていなければ0
+    pub frame_time: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,8 +82,9 @@ pub struct PlayerOptions {
 struct Board {
     status: PlayerStatus,
     frame: Option<Picture>,
-    /// まだ渡していない最新のシーク先（秒）
-    seek: Option<f64>,
+    /// まだ渡していない最新のシーク先（秒）と、キーフレームに寄せずに正確に動くか
+    seek: Option<(f64, bool)>,
+    rate: Option<f64>,
     /// 再生か一時停止の指示
     play: Option<bool>,
     muted: Option<bool>,
@@ -139,7 +144,16 @@ impl Player {
 
     /// 秒で位置を指定する。送りきれない分は最新だけが残る。
     pub fn seek(&self, seconds: f64) {
-        self.shared.board().seek = Some(seconds);
+        self.shared.board().seek = Some((seconds, false));
+    }
+
+    /// キーフレームに寄せずに、その時刻のコマへ動く。コマ送りに使う。
+    pub fn seek_exact(&self, seconds: f64) {
+        self.shared.board().seek = Some((seconds, true));
+    }
+
+    pub fn set_rate(&self, rate: f64) {
+        self.shared.board().rate = Some(rate);
     }
 
     pub fn set_muted(&self, muted: bool) {
@@ -330,21 +344,27 @@ unsafe fn drive(
         let mut target: Option<Target> = None;
         let mut size = (0, 0);
         let mut last_time = None;
+        let mut frame_time = 0.;
+        let mut last_delta = None;
         while !shared.stopped() {
             if shared.failed.load(Ordering::SeqCst) {
                 return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
             }
             let ready = engine.GetReadyState() >= 1;
             let has_video = ready && engine.HasVideo().as_bool();
-            let (play, seek, muted, wanted) = {
+            let (play, seek, muted, rate, wanted) = {
                 let mut board = shared.board();
-                (board.play.take(), if ready && !engine.IsSeeking().as_bool() { board.seek.take() } else { None }, board.muted.take(), board.target)
+                (board.play.take(), if ready && !engine.IsSeeking().as_bool() { board.seek.take() } else { None }, board.muted.take(), board.rate.take(), board.target)
             };
+            if let Some(rate) = rate {
+                let _ = engine.SetPlaybackRate(rate);
+            }
             if let Some(muted) = muted {
                 let _ = engine.SetVolume(volume_of(muted));
             }
-            if let Some(seconds) = seek {
-                let _ = extended.SetCurrentTimeEx(seconds, MF_MEDIA_ENGINE_SEEK_MODE_APPROXIMATE);
+            if let Some((seconds, exact)) = seek {
+                let mode = if exact { MF_MEDIA_ENGINE_SEEK_MODE_NORMAL } else { MF_MEDIA_ENGINE_SEEK_MODE_APPROXIMATE };
+                let _ = extended.SetCurrentTimeEx(seconds, mode);
             }
             match play {
                 Some(true) => {
@@ -364,6 +384,18 @@ unsafe fn drive(
                     }
                 }
                 if let Some(time) = next_frame(engine) {
+                    // 等速で流れている間に、同じ差が2回続いたらそれを1コマとする。シークの前後の差は続かないので外れる
+                    let steady = !engine.IsPaused().as_bool() && !engine.IsSeeking().as_bool() && engine.GetPlaybackRate() == 1.;
+                    match last_time.filter(|&last| steady && time > last) {
+                        Some(last) => {
+                            let delta = (time - last) as f64 / 10_000_000.;
+                            if last_delta.is_some_and(|previous: f64| (previous - delta).abs() < 0.0005) && (frame_time == 0. || delta < frame_time) {
+                                frame_time = delta;
+                            }
+                            last_delta = Some(delta);
+                        }
+                        None => last_delta = None,
+                    }
                     let (width, height) = fit_inside(size.0, size.1, wanted.0, wanted.1);
                     let fresh = last_time != Some(time) || target.as_ref().is_some_and(|t| (t.width, t.height) != (width, height));
                     if fresh && width > 0 {
@@ -385,6 +417,8 @@ unsafe fn drive(
                 video_size: size,
                 position: engine.GetCurrentTime(),
                 duration: if duration.is_finite() { duration } else { 0. },
+                rate: engine.GetPlaybackRate(),
+                frame_time,
             };
             let fresh = frame.is_some();
             {
@@ -420,6 +454,11 @@ fn orientation_transform(orientation: u16) -> WICBitmapTransformOptions {
 
 /// 画像を枠に収まる大きさで読む。Windowsに入っている形式はすべて読める。止まらないよう別のスレッドから呼ぶ。
 pub fn decode_image(path: &Path, max_width: u32, max_height: u32) -> windows::core::Result<Picture> {
+    decode_image_sized(path, max_width, max_height).map(|(picture, _)| picture)
+}
+
+/// `decode_image` と同じに読み、向きを直した後の元の縦横も返す。拡大の等倍を決めるのに使う。
+pub fn decode_image_sized(path: &Path, max_width: u32, max_height: u32) -> windows::core::Result<(Picture, (u32, u32))> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_ALL)?;
@@ -459,7 +498,7 @@ pub fn decode_image(path: &Path, max_width: u32, max_height: u32) -> windows::co
         converter.GetSize(&mut width, &mut height)?;
         let mut bgra = vec![0u8; width as usize * height as usize * 4];
         converter.CopyPixels(std::ptr::null(), width * 4, &mut bgra)?;
-        Ok(Picture { width, height, bgra })
+        Ok((Picture { width, height, bgra }, (shown_width, shown_height)))
     }
 }
 

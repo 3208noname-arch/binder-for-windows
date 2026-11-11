@@ -4,14 +4,16 @@ use crate::browser::{Browser, window_handle};
 use crate::parts::{Icon, icon};
 use crate::theme;
 use filer_core::{
-    HOVER_DELAY_MS, HoverGate, PreviewKind, popup_size, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, ViewMode, format_media_time, fraction_at, preview_kind,
+    FALLBACK_FRAME, HOVER_DELAY_MS, HoverGate, PreviewKind, popup_size, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, ViewMode, clamp_position, format_media_time, fraction_at,
+    next_speed, preview_kind, skip_seconds, speed_label, wheel_share,
 };
 use filer_shell::{Picture, Player, PlayerOptions, PlayerStatus};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::select;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, RenderImage, Task, Window, anchored, canvas,
+    Animation, AnimationExt, AnyElement, App, Bounds, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, RenderImage, ScrollDelta, ScrollWheelEvent, Task,
+    Window, anchored, canvas,
     deferred, div, img, point, prelude::*, px, rgb, rgba,
 };
 use std::cell::Cell;
@@ -29,6 +31,8 @@ const TIME_SHOWN: Duration = Duration::from_millis(600);
 const CONTROLS_HEIGHT: f32 = 32.;
 /// ポップアップとウィンドウの端の間
 const POPUP_MARGIN: f32 = 8.;
+/// キーで動かした行き先を、次の操作の起点として覚えておく長さ。シークが終わる前に続けて押した分を足すため
+const TARGET_KEPT: Duration = Duration::from_millis(400);
 
 /// `Picture` を描ける画像にする。バイトの並びはBGRAのまま渡す。
 pub fn picture_image(picture: Picture) -> Option<Arc<RenderImage>> {
@@ -79,6 +83,11 @@ pub struct MediaSurface {
     hwnd: isize,
     pump: Option<Task<()>>,
     wake: mpsc::UnboundedSender<()>,
+    /// キーとホイールで動かした行き先と、その時刻
+    target: Option<(f64, Instant)>,
+    /// ホイールの間引きで、まだ再生器に送っていない行き先がある
+    unsent: bool,
+    rate: f64,
 }
 
 impl MediaSurface {
@@ -128,6 +137,9 @@ impl MediaSurface {
             hwnd: window_handle(window),
             pump: Some(pump),
             wake,
+            target: None,
+            unsent: false,
+            rate: 1.,
         }
     }
 
@@ -189,6 +201,9 @@ impl MediaSurface {
                 }
                 cx.notify();
             }
+        }
+        if self.unsent && self.seek_allowed() {
+            self.send_target();
         }
         let Some(player) = &self.player else { return };
         if self.hover && self.drawn.elapsed() > UNSEEN {
@@ -286,11 +301,87 @@ impl MediaSurface {
         }
     }
 
-    fn toggle_play(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
         if let Some(player) = &self.player {
             player.play(self.status.paused);
         }
         cx.notify();
+    }
+
+    fn frame_time(&self) -> f64 {
+        if self.status.frame_time > 0. { self.status.frame_time } else { FALLBACK_FRAME }
+    }
+
+    /// 次に動かす起点。直前に動かした行き先があればそこから足す。
+    fn base_position(&self) -> f64 {
+        self.target.filter(|(_, at)| at.elapsed() < TARGET_KEPT).map_or(self.status.position, |(seconds, _)| seconds)
+    }
+
+    fn seek_allowed(&self) -> bool {
+        self.last_seek.is_none_or(|last| last.elapsed() >= Duration::from_millis(SCRUB_THROTTLE_MS))
+    }
+
+    fn send_target(&mut self) {
+        if let (Some(player), Some((seconds, _))) = (&self.player, self.target) {
+            player.seek_exact(seconds);
+            self.last_seek = Some(Instant::now());
+            self.unsent = false;
+        }
+    }
+
+    /// 秒の位置へ正確に動く。`throttled` なら送る間隔をあけ、間に来た分は最新の行き先だけを後で送る。
+    fn move_to(&mut self, seconds: f64, throttled: bool, cx: &mut Context<Self>) {
+        if self.player.is_none() || !self.status.ready {
+            return;
+        }
+        let seconds = clamp_position(seconds, self.status.duration, self.frame_time());
+        self.target = Some((seconds, Instant::now()));
+        if throttled && !self.seek_allowed() {
+            self.unsent = true;
+        } else {
+            self.send_target();
+        }
+        self.time_until = Some(Instant::now() + TIME_SHOWN);
+        cx.notify();
+    }
+
+    /// コマ送り。止めてから動かす。
+    pub fn step_frames(&mut self, frames: i32, cx: &mut Context<Self>) {
+        if let Some(player) = &self.player
+            && !self.status.paused
+        {
+            player.play(false);
+        }
+        let seconds = self.base_position() + frames as f64 * self.frame_time();
+        self.move_to(seconds, false, cx);
+    }
+
+    /// 長さの2%（最大10秒）に `share` を掛けた分だけ動く。再生か停止かは変えない。
+    pub fn skip(&mut self, share: f64, throttled: bool, cx: &mut Context<Self>) {
+        let seconds = self.base_position() + skip_seconds(self.status.duration) * share;
+        self.move_to(seconds, throttled, cx);
+    }
+
+    pub fn change_speed(&mut self, faster: bool, cx: &mut Context<Self>) {
+        self.rate = next_speed(self.rate, faster);
+        if let Some(player) = &self.player {
+            player.set_rate(self.rate);
+        }
+        cx.notify();
+    }
+
+    /// ホイールでシークする。下へ回すと進む。
+    fn wheel_seek(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
+        };
+        if lines == 0. {
+            return;
+        }
+        cx.stop_propagation();
+        let share = wheel_share(lines) * if lines < 0. { 1. } else { -1. };
+        self.skip(share, true, cx);
     }
 
     fn toggle_mute(&mut self, cx: &mut Context<Self>) {
@@ -429,6 +520,7 @@ impl MediaSurface {
                         }),
                     ),
             )
+            .children(speed_label(self.rate).map(|label| div().flex_none().px_1().rounded_sm().bg(rgb(theme::HOVER)).child(label)))
             .child(div().flex_none().text_color(rgb(theme::SUB_TEXT)).child(self.time_text()))
             .child(
                 Self::glyph(if self.muted { Icon::Muted } else { Icon::Sound }, theme::TEXT)
@@ -475,6 +567,7 @@ impl MediaSurface {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.bar_held = false))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.bar_held = false))
+            .when(!failed, |view| view.on_scroll_wheel(cx.listener(Self::wheel_seek)))
     }
 }
 
@@ -488,7 +581,7 @@ impl Render for MediaSurface {
 
 impl Drop for MediaSurface {
     fn drop(&mut self) {
-        media_log(format!("end hover={} frames={} seconds={:.2} fps={:.1}", self.hover, self.frames, self.created.elapsed().as_secs_f32(), self.frames as f32 / self.created.elapsed().as_secs_f32()));
+        media_log(format!("end hover={} frames={} frame_time={:.4} seconds={:.2} fps={:.1}", self.hover, self.frames, self.status.frame_time, self.created.elapsed().as_secs_f32(), self.frames as f32 / self.created.elapsed().as_secs_f32()));
     }
 }
 
