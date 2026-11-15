@@ -5,7 +5,7 @@ use crate::parts::{Icon, icon};
 use crate::theme;
 use filer_core::{
     FALLBACK_FRAME, HOVER_DELAY_MS, HoverGate, PreviewKind, popup_size, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, ViewMode, clamp_position, format_media_time, fraction_at,
-    next_speed, preview_kind, skip_seconds, speed_label, wheel_share,
+    MAX_VOLUME, next_speed, preview_kind, skip_seconds, speed_label, step_volume, volume_at, wheel_share,
 };
 use filer_shell::{Picture, Player, PlayerOptions, PlayerStatus};
 use futures::StreamExt;
@@ -52,6 +52,22 @@ fn media_log(line: String) {
 
 type MuteChanged = Rc<dyn Fn(bool, &mut App)>;
 
+/// 再生の音量（%）。開いている面と一覧で同じ値を持ち、決まった値は `save` で設定に残す。
+#[derive(Clone)]
+pub struct Volume {
+    pub level: Rc<Cell<u64>>,
+    pub save: Rc<dyn Fn(u64, &mut App)>,
+}
+
+impl Volume {
+    fn fraction(&self) -> f64 {
+        self.level.get().min(MAX_VOLUME) as f64 / MAX_VOLUME as f64
+    }
+}
+
+/// 音量のスライダーの幅
+const VOLUME_WIDTH: f32 = 64.;
+
 /// 1つのファイルの再生。捨てると音が止まる。
 pub struct MediaSurface {
     path: PathBuf,
@@ -60,6 +76,10 @@ pub struct MediaSurface {
     audio: bool,
     muted: bool,
     on_mute: Option<MuteChanged>,
+    volume: Volume,
+    volume_bar: Rc<Cell<Bounds<Pixels>>>,
+    /// 音量のスライダーを掴んでいる
+    volume_held: bool,
     player: Option<Player>,
     status: PlayerStatus,
     image: Option<Arc<RenderImage>>,
@@ -91,7 +111,8 @@ pub struct MediaSurface {
 }
 
 impl MediaSurface {
-    pub fn new(path: PathBuf, kind: PreviewKind, hover: bool, muted: bool, on_mute: Option<MuteChanged>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(path: PathBuf, kind: PreviewKind, hover: bool, muted: bool, on_mute: Option<MuteChanged>, volume: Volume, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 絵が届いたらすぐ起きる。タイマーの刻みでは60fpsに届かない
         let (wake, mut woken) = mpsc::unbounded::<()>();
         let pump = cx.spawn_in(window, async move |this, cx| {
@@ -117,6 +138,9 @@ impl MediaSurface {
             audio: kind == PreviewKind::Audio,
             muted,
             on_mute,
+            volume,
+            volume_bar: Rc::default(),
+            volume_held: false,
             player: None,
             status: PlayerStatus::default(),
             image: None,
@@ -243,7 +267,7 @@ impl MediaSurface {
         if self.player.is_some() || self.stopped || self.away {
             return;
         }
-        let options = PlayerOptions { looping: self.hover && !self.audio, muted: self.muted && self.hover, autoplay: true };
+        let options = PlayerOptions { looping: self.hover && !self.audio, muted: self.muted && self.hover, volume: self.volume.fraction(), autoplay: true };
         let wake = self.wake.clone();
         self.player = Some(Player::open(self.path.clone(), options, move || {
             let _ = wake.unbounded_send(());
@@ -371,7 +395,7 @@ impl MediaSurface {
     }
 
     /// ホイールでシークする。下へ回すと進む。
-    fn wheel_seek(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn wheel_seek(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let lines = match event.delta {
             ScrollDelta::Lines(lines) => lines.y,
             ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
@@ -393,6 +417,65 @@ impl MediaSurface {
             changed(self.muted, cx);
         }
         cx.notify();
+    }
+
+    /// 音量を変える。音を出す音量にしたら消音も解く。`save` の時だけ設定に残す。
+    fn set_volume(&mut self, level: u64, save: bool, cx: &mut Context<Self>) {
+        let level = level.min(MAX_VOLUME);
+        self.volume.level.set(level);
+        if let Some(player) = &self.player {
+            player.set_volume(self.volume.fraction());
+        }
+        if level > 0 && self.muted {
+            self.toggle_mute(cx);
+        }
+        if save {
+            (self.volume.save.clone())(level, cx);
+        }
+        cx.notify();
+    }
+
+    fn volume_drag(&mut self, x: f32, save: bool, cx: &mut Context<Self>) {
+        let bar = self.volume_bar.get();
+        self.set_volume(volume_at(fraction_at(x, f32::from(bar.origin.x), f32::from(bar.size.width))), save, cx);
+    }
+
+    /// 音量のスライダーの上のホイール。上へ回すと大きくなる。
+    fn wheel_volume(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
+        };
+        cx.stop_propagation();
+        if lines == 0. {
+            return;
+        }
+        let level = step_volume(self.volume.level.get(), lines > 0.);
+        self.set_volume(level, true, cx);
+    }
+
+    fn volume_slider(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let bar = self.volume_bar.clone();
+        let fill = if self.muted { 0. } else { self.volume.fraction() as f32 };
+        div()
+            .id("media-volume")
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .w(px(VOLUME_WIDTH))
+            .h(px(16.))
+            .child(canvas(move |bounds, _, _| bar.set(bounds), |_, _, _, _| {}).absolute().size_full())
+            .child(div().w_full().h(px(4.)).rounded_full().bg(rgb(theme::HOVER)).child(div().h_full().rounded_full().w(gpui::relative(fill)).bg(rgb(theme::SELECTED))))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.volume_held = true;
+                    this.volume_drag(f32::from(event.position.x), false, cx);
+                }),
+            )
+            .on_scroll_wheel(cx.listener(Self::wheel_volume))
     }
 
     fn seek_bar(&mut self, x: f32, cx: &mut Context<Self>) {
@@ -528,6 +611,16 @@ impl MediaSurface {
                     .hover(|button| button.bg(rgb(theme::HOVER)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx))),
             )
+            .child(self.volume_slider(cx))
+    }
+
+    /// 掴んでいたバーを放す。音量は放した時に設定へ残す。
+    fn release_bars(&mut self, cx: &mut Context<Self>) {
+        self.bar_held = false;
+        if std::mem::take(&mut self.volume_held) {
+            let level = self.volume.level.get();
+            (self.volume.save.clone())(level, cx);
+        }
     }
 
     fn player_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -564,9 +657,12 @@ impl MediaSurface {
                 if this.bar_held {
                     this.seek_bar(f32::from(event.position.x), cx);
                 }
+                if this.volume_held {
+                    this.volume_drag(f32::from(event.position.x), false, cx);
+                }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.bar_held = false))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.bar_held = false))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.release_bars(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.release_bars(cx)))
             .when(!failed, |view| view.on_scroll_wheel(cx.listener(Self::wheel_seek)))
     }
 }
@@ -645,8 +741,20 @@ impl Browser {
         let on_mute: MuteChanged = Rc::new(move |muted, cx| {
             let _ = browser.update(cx, |browser, cx| browser.set_hover_silent(muted, cx));
         });
-        self.hover_media.surface = Some(cx.new(|cx| MediaSurface::new(path, kind, true, muted, Some(on_mute), window, cx)));
+        let volume = self.volume_handle(cx);
+        self.hover_media.surface = Some(cx.new(|cx| MediaSurface::new(path, kind, true, muted, Some(on_mute), volume, window, cx)));
         cx.notify();
+    }
+
+    /// 再生の面に渡す音量。変えた値は設定に保存する。
+    pub fn volume_handle(&self, cx: &Context<Self>) -> Volume {
+        let browser = cx.entity().downgrade();
+        Volume {
+            level: self.media_volume.clone(),
+            save: Rc::new(move |level, cx| {
+                let _ = browser.update(cx, |browser, cx| browser.set_volume(level, cx));
+            }),
+        }
     }
 
     /// この項目のマウスオーバーの面。
@@ -697,7 +805,8 @@ impl Browser {
 
     /// カラムのプレビュー欄で再生を始める。
     pub fn play_in_panel(&mut self, path: PathBuf, kind: PreviewKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel_media = Some(cx.new(|cx| MediaSurface::new(path, kind, false, false, None, window, cx)));
+        let volume = self.volume_handle(cx);
+        self.panel_media = Some(cx.new(|cx| MediaSurface::new(path, kind, false, false, None, volume, window, cx)));
         cx.notify();
     }
 

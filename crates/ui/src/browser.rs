@@ -113,6 +113,8 @@ pub struct Browser {
     pub header_drag: Option<HeaderDrag>,
     pub settings: AppSettings,
     pub settings_model: Entity<SettingsModel>,
+    /// 再生の音量（%）。開いている再生の面と同じ値を持つ
+    pub media_volume: Rc<std::cell::Cell<u64>>,
     settings_window: Option<WindowHandle<SettingsView>>,
     pub suppress_click: bool,
     /// 今の押下が `grab_zone` の上だった
@@ -170,6 +172,7 @@ impl Browser {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let settings = store.as_ref().map(Store::app_settings).unwrap_or_default();
+        let volume = settings.volume;
         let favorites = store.as_ref().and_then(Store::favorites).unwrap_or_else(|| {
             favorites().into_iter().map(|(name, path)| Favorite { name, path }).collect()
         });
@@ -251,6 +254,7 @@ impl Browser {
             quick_look: None,
             quick_look_item: None,
             quick_look_bounds: None,
+            media_volume: Rc::new(std::cell::Cell::new(volume)),
             drive_labels: HashMap::new(),
             menu: None,
             sort_anchor: Rc::default(),
@@ -317,6 +321,19 @@ impl Browser {
     pub fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
         self.settings_model.update(cx, |model, cx| {
             model.value.show_hidden = !model.value.show_hidden;
+            cx.notify();
+        });
+        self.save_settings(cx);
+    }
+
+    /// 再生の音量を、次の再生にも残す。
+    pub fn set_volume(&mut self, volume: u64, cx: &mut Context<Self>) {
+        self.media_volume.set(volume);
+        if self.settings.volume == volume {
+            return;
+        }
+        self.settings_model.update(cx, |model, cx| {
+            model.value.volume = volume;
             cx.notify();
         });
         self.save_settings(cx);

@@ -26,6 +26,21 @@ pub fn wheel_share(lines: f32) -> f64 {
     (lines.abs() as f64).clamp(WHEEL_MIN, 1.)
 }
 
+/// 音量の上限（%）。
+pub const MAX_VOLUME: u64 = 100;
+/// ホイール1回で変える音量（%）。
+const VOLUME_STEP: u64 = 5;
+
+/// ホイールで1段動いた音量。
+pub fn step_volume(volume: u64, up: bool) -> u64 {
+    if up { (volume + VOLUME_STEP).min(MAX_VOLUME) } else { volume.saturating_sub(VOLUME_STEP) }
+}
+
+/// スライダーの位置の割合を音量にする。
+pub fn volume_at(fraction: f64) -> u64 {
+    (fraction.clamp(0., 1.) * MAX_VOLUME as f64).round() as u64
+}
+
 /// 速度の表示。1倍の時は出さない。
 pub fn speed_label(speed: f64) -> Option<String> {
     ((speed - 1.).abs() > 1e-6).then(|| format!("{}×", (speed * 100.).round() / 100.))
@@ -42,6 +57,17 @@ pub fn clamp_position(seconds: f64, duration: f64, frame: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_steps_stay_in_range() {
+        assert_eq!(step_volume(100, true), 100);
+        assert_eq!(step_volume(98, true), 100);
+        assert_eq!(step_volume(50, false), 45);
+        assert_eq!(step_volume(3, false), 0);
+        assert_eq!(volume_at(0.5), 50);
+        assert_eq!(volume_at(-0.2), 0);
+        assert_eq!(volume_at(1.3), 100);
+    }
 
     #[test]
     fn speed_moves_one_step_and_stops_at_the_ends() {

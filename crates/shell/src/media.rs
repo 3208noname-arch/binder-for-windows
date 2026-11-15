@@ -74,6 +74,8 @@ pub struct PlayerStatus {
 pub struct PlayerOptions {
     pub looping: bool,
     pub muted: bool,
+    /// 0から1の音量。消音の時は使わない
+    pub volume: f64,
     pub autoplay: bool,
 }
 
@@ -88,6 +90,7 @@ struct Board {
     /// 再生か一時停止の指示
     play: Option<bool>,
     muted: Option<bool>,
+    volume: Option<f64>,
     /// 映像を出す枠の大きさ（物理ピクセル）
     target: (u32, u32),
 }
@@ -158,6 +161,11 @@ impl Player {
 
     pub fn set_muted(&self, muted: bool) {
         self.shared.board().muted = Some(muted);
+    }
+
+    /// 0から1の音量。消音の間は覚えておき、消音を解いた時に使う。
+    pub fn set_volume(&self, volume: f64) {
+        self.shared.board().volume = Some(volume.clamp(0., 1.));
     }
 
     /// 絵の大きさの上限を伝える。小さな枠に大きな絵を運ばないためのもの。
@@ -268,8 +276,8 @@ unsafe fn create_engine(shared: &Arc<Shared>) -> windows::core::Result<(ID3D11De
 }
 
 /// 消音は音量0で表す。`SetMuted` は読み込みの前に指定すると効かない。
-fn volume_of(muted: bool) -> f64 {
-    if muted { 0. } else { 1. }
+fn volume_of(muted: bool, volume: f64) -> f64 {
+    if muted { 0. } else { volume.clamp(0., 1.) }
 }
 
 /// 新しいコマがあればその時刻を返す。
@@ -322,7 +330,8 @@ unsafe fn drive(
     wake: &dyn Fn(),
 ) -> windows::core::Result<()> {
     unsafe {
-        engine.SetVolume(volume_of(options.muted))?;
+        let (mut muted_now, mut volume_now) = (options.muted, options.volume);
+        engine.SetVolume(volume_of(muted_now, volume_now))?;
         engine.SetLoop(options.looping)?;
         engine.SetAutoPlay(options.autoplay)?;
         if shared.stopped() {
@@ -352,15 +361,17 @@ unsafe fn drive(
             }
             let ready = engine.GetReadyState() >= 1;
             let has_video = ready && engine.HasVideo().as_bool();
-            let (play, seek, muted, rate, wanted) = {
+            let (play, seek, muted, volume, rate, wanted) = {
                 let mut board = shared.board();
-                (board.play.take(), if ready && !engine.IsSeeking().as_bool() { board.seek.take() } else { None }, board.muted.take(), board.rate.take(), board.target)
+                (board.play.take(), if ready && !engine.IsSeeking().as_bool() { board.seek.take() } else { None }, board.muted.take(), board.volume.take(), board.rate.take(), board.target)
             };
             if let Some(rate) = rate {
                 let _ = engine.SetPlaybackRate(rate);
             }
-            if let Some(muted) = muted {
-                let _ = engine.SetVolume(volume_of(muted));
+            if muted.is_some() || volume.is_some() {
+                muted_now = muted.unwrap_or(muted_now);
+                volume_now = volume.unwrap_or(volume_now);
+                let _ = engine.SetVolume(volume_of(muted_now, volume_now));
             }
             if let Some((seconds, exact)) = seek {
                 let mode = if exact { MF_MEDIA_ENGINE_SEEK_MODE_NORMAL } else { MF_MEDIA_ENGINE_SEEK_MODE_APPROXIMATE };
@@ -703,7 +714,7 @@ mod tests {
         bytes
     }
 
-    const OPTIONS: PlayerOptions = PlayerOptions { looping: false, muted: true, autoplay: false };
+    const OPTIONS: PlayerOptions = PlayerOptions { looping: false, muted: true, volume: 1., autoplay: false };
 
     #[test]
     fn missing_file_fails_without_panicking() {

@@ -2,7 +2,7 @@
 
 use crate::browser::{Browser, window_handle};
 use crate::icon_cache::{IconCache, LARGE};
-use crate::media_view::{MediaSurface, picture_image};
+use crate::media_view::{MediaSurface, Volume, picture_image};
 use crate::parts::{Icon, icon};
 use crate::picture_view::PictureView;
 use crate::theme;
@@ -75,6 +75,7 @@ pub struct QuickLook {
     hwnd: isize,
     /// 今のウィンドウの大きさを決めた、中身の縦横と操作の高さ
     fitted: Option<(f32, f32, f32)>,
+    volume: Volume,
 }
 
 /// 読んだテキストを行に分ける。長い行は切り、タブは見える幅にする。
@@ -102,6 +103,7 @@ impl QuickLook {
         let owner_hwnd = browser.hwnd;
         let icons = browser.icons.clone();
         let show_hidden = browser.settings.show_hidden;
+        let volume = browser.volume_handle(cx);
         cx.open_window(options, move |window, cx| {
             cx.new(|cx| {
                 let hwnd = window_handle(window);
@@ -125,6 +127,7 @@ impl QuickLook {
                     wheel: 0.,
                     hwnd,
                     fitted: None,
+                    volume,
                 };
                 view.show(folder, entry, show_hidden, window, cx);
                 // このウィンドウが押された時にキーを受け取れるようにする。一覧のフォーカスには影響しない
@@ -148,7 +151,8 @@ impl QuickLook {
         }
         self.content = match kind {
             PreviewKind::Video | PreviewKind::Audio => {
-                let surface = cx.new(|cx| MediaSurface::new(path, kind, false, false, None, window, cx));
+                let volume = self.volume.clone();
+                let surface = cx.new(|cx| MediaSurface::new(path, kind, false, false, None, volume, window, cx));
                 // 再生できないと分かった時に描き直す
                 self.watch = Some(cx.observe(&surface, |_, _, cx| cx.notify()));
                 Content::Media { surface, audio: kind == PreviewKind::Audio }
@@ -532,12 +536,16 @@ impl Render for QuickLook {
             Content::Media { surface, audio } if *audio || surface.read(cx).failed() => {
                 let surface = surface.clone();
                 let info = self.info(cx);
+                let wheel = surface.clone();
                 div()
+                    .id("quick-look-audio")
                     .flex()
                     .flex_col()
                     .size_full()
                     .child(div().flex_1().min_h_0().child(info))
                     .child(div().flex_none().h(px(AUDIO_BAR)).px_3().child(surface))
+                    // 情報の上で回しても飛ばせるようにする。下の操作の上では面が先に受ける
+                    .on_scroll_wheel(move |event, window, cx| wheel.update(cx, |surface, cx| surface.wheel_seek(event, window, cx)))
                     .into_any_element()
             }
             Content::Media { surface, .. } => div().size_full().child(surface.clone()).into_any_element(),

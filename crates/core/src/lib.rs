@@ -22,7 +22,7 @@ pub use group::{Date, Group, GroupKey, Properties, date_group, name_group, size_
 pub use history::History;
 pub use media::{HOVER_DELAY_MS, HoverGate, PreviewKind, SCRUB_RESUME_MS, SCRUB_THROTTLE_MS, SPINNER_DELAY_MS, decode_text, fit_inside, fit_window, format_media_time, fraction_at, popup_size, preview_kind};
 pub use path_input::parse_path_input;
-pub use playback::{FALLBACK_FRAME, SPEEDS, clamp_position, next_speed, skip_seconds, speed_label, wheel_share};
+pub use playback::{FALLBACK_FRAME, MAX_VOLUME, SPEEDS, clamp_position, next_speed, skip_seconds, speed_label, step_volume, volume_at, wheel_share};
 pub use selection::Selection;
 pub use tabs::{SavedTab, TabList, TabSession};
 pub use tree::{MAX_TREE_LINES, Tree, TreeItem, TreeLine, build_tree, read_zip_items, visible_lines};

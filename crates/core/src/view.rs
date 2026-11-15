@@ -46,6 +46,8 @@ pub struct AppSettings {
     pub hover_play: bool,
     /// マウスオーバーの再生を消音にする。既定は音あり
     pub hover_silent: bool,
+    /// 再生の音量（%）。クイックルック、プレビュー欄、マウスオーバーで共通
+    pub volume: u64,
     pub scrollbar: ScrollbarMode,
     /// 隠し属性の項目も一覧に出す
     pub show_hidden: bool,
@@ -127,6 +129,7 @@ impl Default for AppSettings {
             scroll_long_names: true,
             hover_play: true,
             hover_silent: false,
+            volume: 100,
             scrollbar: ScrollbarMode::WhileScrolling,
             show_hidden: false,
             focus_new_tabs: false,
@@ -474,6 +477,7 @@ mod tests {
         assert!(settings.scroll_long_names);
         assert!(settings.hover_play);
         assert!(!settings.hover_silent);
+        assert_eq!(settings.volume, 100);
     }
 
     #[test]
