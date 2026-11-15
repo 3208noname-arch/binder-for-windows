@@ -331,13 +331,13 @@ impl Browser {
         self.save_settings(cx);
     }
 
-    /// 開いている一覧から項目を探す。ディスクは読まない。
-    pub fn find_entry(&self, path: &Path, cx: &App) -> Option<Entry> {
-        let name = path.file_name()?;
-        let folder = path.parent()?;
+    /// 開いている一覧から項目を探し、その一覧のフォルダと組で返す。ディスクは読まない。
+    /// 検索結果の項目は名前が起点からの相対パスなので、親フォルダと名前ではなく、一覧のフォルダからの残りで比べる。
+    pub fn find_entry(&self, path: &Path, cx: &App) -> Option<(PathBuf, Entry)> {
         let in_pane = |pane: &Entity<FolderPane>| {
             let state = &pane.read(cx).state;
-            (state.path == folder).then(|| state.entries.iter().find(|entry| entry.os_name() == name).cloned()).flatten()
+            let rest = path.strip_prefix(&state.path).ok()?;
+            state.entries.iter().find(|entry| Path::new(entry.os_name()) == rest).map(|entry| (state.path.clone(), entry.clone()))
         };
         in_pane(&self.tab.pane)
             .or_else(|| self.tab.expanded.iter().find_map(|(_, pane)| in_pane(pane)))

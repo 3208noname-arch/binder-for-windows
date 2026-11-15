@@ -567,7 +567,7 @@ impl Browser {
     /// 選択の先頭の項目。カーソルがある項目を選び、無ければどれか1つを使う。
     fn quick_look_target(&self, cx: &App) -> Option<(PathBuf, Entry)> {
         let path = self.tab.selection.cursor().filter(|path| self.tab.selection.contains(path)).map(Path::to_path_buf).or_else(|| self.tab.selection.paths().pop())?;
-        self.find_entry(&path, cx).map(|entry| (path.parent().unwrap_or(&path).to_path_buf(), entry))
+        self.find_entry(&path, cx)
     }
 
     /// スペースキー。動画か音声を見せていれば再生と一時停止、それ以外で開いていれば閉じる。
