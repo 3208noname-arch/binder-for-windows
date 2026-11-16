@@ -108,6 +108,8 @@ pub struct MediaSurface {
     /// ホイールの間引きで、まだ再生器に送っていない行き先がある
     unsent: bool,
     rate: f64,
+    /// 操作の行の左右の余白。絵を窓いっぱいに出す時に、ボタンを端から離す
+    pub controls_inset: f32,
 }
 
 impl MediaSurface {
@@ -164,6 +166,7 @@ impl MediaSurface {
             target: None,
             unsent: false,
             rate: 1.,
+            controls_inset: 0.,
         }
     }
 
@@ -576,6 +579,7 @@ impl MediaSurface {
             .gap_1()
             .h(px(CONTROLS_HEIGHT))
             .w_full()
+            .px(px(self.controls_inset))
             .text_size(px(theme::SMALL_TEXT_SIZE))
             .child(
                 Self::glyph(if self.status.paused { Icon::Play } else { Icon::Pause }, theme::TEXT)

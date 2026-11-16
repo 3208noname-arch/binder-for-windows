@@ -40,6 +40,8 @@ const GLYPH_FILE: &str = "\u{E7C3}";
 const PICTURE_PADDING: f32 = 8.;
 /// 動画の下の操作の高さ
 const MEDIA_CONTROLS: f32 = 32.;
+/// 再生の操作の左右の余白。音声と動画で揃える
+const MEDIA_SIDE: f32 = 12.;
 /// PDFのページの長辺の上限。文字が読める細かさにする。
 const PDF_LIMIT: u32 = 1800;
 /// ページの下の操作の高さ
@@ -152,7 +154,14 @@ impl QuickLook {
         self.content = match kind {
             PreviewKind::Video | PreviewKind::Audio => {
                 let volume = self.volume.clone();
-                let surface = cx.new(|cx| MediaSurface::new(path, kind, false, false, None, volume, window, cx));
+                let surface = cx.new(|cx| {
+                    let mut surface = MediaSurface::new(path, kind, false, false, None, volume, window, cx);
+                    // 音声は外側の枠で離すので、窓いっぱいに出す動画だけ内側で離す
+                    if kind == PreviewKind::Video {
+                        surface.controls_inset = MEDIA_SIDE;
+                    }
+                    surface
+                });
                 // 再生できないと分かった時に描き直す
                 self.watch = Some(cx.observe(&surface, |_, _, cx| cx.notify()));
                 Content::Media { surface, audio: kind == PreviewKind::Audio }
@@ -543,7 +552,7 @@ impl Render for QuickLook {
                     .flex_col()
                     .size_full()
                     .child(div().flex_1().min_h_0().child(info))
-                    .child(div().flex_none().h(px(AUDIO_BAR)).px_3().child(surface))
+                    .child(div().flex_none().h(px(AUDIO_BAR)).px(px(MEDIA_SIDE)).child(surface))
                     // 情報の上で回しても飛ばせるようにする。下の操作の上では面が先に受ける
                     .on_scroll_wheel(move |event, window, cx| wheel.update(cx, |surface, cx| surface.wheel_seek(event, window, cx)))
                     .into_any_element()
