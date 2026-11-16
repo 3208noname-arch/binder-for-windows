@@ -170,7 +170,8 @@ impl Browser {
     }
 
     /// アイコンの下の名前。3行に収まらない分は薄く消し、設定によってマウスを乗せると流す。
-    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, empty: bool, look: LabelLook, window: &Window) -> AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    fn grid_label(&self, ix: usize, path: &Path, entry: &Entry, empty: bool, look: LabelLook, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let width = theme::grid_label_width(self.tab.view.icon_size);
         let name = if empty { format!("{}（空）", entry.name) } else { entry.name.clone() };
         let lines = label_lines(&name, width, window);
@@ -204,6 +205,7 @@ impl Browser {
             let fade = linear_gradient(180., linear_color_stop(gpui::Rgba { a: 0., ..color }, 0.), linear_color_stop(color, 1.));
             label.child(text).when(overflowing, |label| label.child(div().absolute().left_0().right_0().bottom_0().h(px(line)).bg(fade)))
         };
+        let label = self.rename_on_double_click(label, path, cx);
         div()
             .flex()
             .flex_col()
@@ -236,7 +238,7 @@ impl Browser {
         };
         let look = LabelLook { selected, highlight, fill, text: selected_text };
         let empty = self.is_empty_folder(&path, entry, cx);
-        let label = self.grid_label(ix, &path, entry, empty, look, window);
+        let label = self.grid_label(ix, &path, entry, empty, look, window, cx);
         let label_path = path.clone();
         let media = self.hover_surface(&path);
         let popup = media.clone().and_then(|surface| self.hover_popup(surface, path.clone(), is_dir, size, cx));

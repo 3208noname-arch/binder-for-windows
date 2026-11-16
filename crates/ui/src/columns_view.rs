@@ -156,6 +156,10 @@ impl Browser {
         if std::mem::take(&mut self.suppress_click) {
             return;
         }
+        // 編集欄の中のクリックで、フォーカスを一覧へ戻さない
+        if self.tab.renaming.as_ref().is_some_and(|renaming| renaming.path == path) {
+            return;
+        }
         self.tab.active_column = column;
         let modifiers = event.modifiers();
         if modifiers.control || modifiers.shift {
@@ -297,7 +301,7 @@ impl Browser {
                     .gap_1()
                     .when(renaming, |label| label.flex_1())
                     .child(icon)
-                    .child(self.name_or_input(&path, &entry));
+                    .child(self.name_or_input(&path, &entry, cx));
                 // 細い列でも「›」が押し出されないよう、掴める幅は列に収める
                 let label = self.grab_zone(label, cx).min_w(px(theme::GRAB_MIN_WIDTH.min(width - theme::COLUMN_ROW_SPARE)));
                 let row = div()

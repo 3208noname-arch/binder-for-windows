@@ -994,6 +994,23 @@ impl Browser {
         cx.notify();
     }
 
+    /// 名前の文字の上のダブルクリックで、名前の編集を始める。行のダブルクリック（開く）へは渡さない。
+    pub fn rename_on_double_click(&self, name: gpui::Div, path: &Path, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+        let target = path.to_path_buf();
+        name.id(gpui::ElementId::Name(format!("name-{}", path.display()).into())).on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            let modifiers = event.modifiers();
+            if event.click_count() != 2 || modifiers.control || modifiers.shift || modifiers.alt {
+                return;
+            }
+            cx.stop_propagation();
+            if std::mem::take(&mut this.suppress_click) {
+                return;
+            }
+            this.tab.selection.select_only(target.clone());
+            this.begin_rename(target.clone(), window, cx);
+        }))
+    }
+
     fn end_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tab.renaming = None;
         remove_ime_caret();
