@@ -159,13 +159,14 @@ struct LabelLook {
 
 impl Browser {
     /// 名前の編集欄。折り返しは表示と同じ幅にして、隣のセルの下の行まで重ねて出す。
-    fn grid_rename(&self, lines: f32, input: Entity<TextInput>) -> AnyElement {
+    fn grid_rename(&self, lines: f32, input: Entity<TextInput>, cx: &mut Context<Self>) -> AnyElement {
         let width = theme::grid_label_width(self.tab.view.icon_size) + theme::RENAME_SIDE * 2.;
+        let field = self.rename_box(div().absolute().top_0().left(px(theme::GRID_LABEL_SIDE - theme::RENAME_SIDE)).w(px(width)).child(input), cx);
         div()
             .relative()
             .w_full()
             .h(px(theme::GRID_LABEL_LINE * lines.min(theme::GRID_LABEL_LINES)))
-            .child(deferred(div().absolute().top_0().left(px(theme::GRID_LABEL_SIDE - theme::RENAME_SIDE)).w(px(width)).child(input)))
+            .child(deferred(field))
             .into_any_element()
     }
 
@@ -176,7 +177,7 @@ impl Browser {
         let name = if empty { format!("{}（空）", entry.name) } else { entry.name.clone() };
         let lines = label_lines(&name, width, window);
         if let Some(renaming) = self.tab.renaming.as_ref().filter(|renaming| renaming.path == path) {
-            return self.grid_rename(lines, renaming.input.clone());
+            return self.grid_rename(lines, renaming.input.clone(), cx);
         }
         let line = theme::GRID_LABEL_LINE;
         let overflowing = lines > theme::GRID_LABEL_LINES;

@@ -1034,6 +1034,11 @@ impl Browser {
             }))
     }
 
+    /// 名前の編集欄。欄の外をどこか押したら、押した所の動作より先に確定する（Explorer と同じ）。
+    pub fn rename_box(&self, field: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        crate::parts::on_press_outside(field, cx, |this, window, cx| this.commit_rename(window, cx))
+    }
+
     fn end_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tab.renaming = None;
         remove_ime_caret();

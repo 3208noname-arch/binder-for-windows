@@ -248,7 +248,7 @@ impl Browser {
     /// 名前の表示。編集中なら入力欄を出す。
     pub fn name_or_input(&self, path: &Path, entry: &Entry, cx: &mut Context<Self>) -> AnyElement {
         match &self.tab.renaming {
-            Some(renaming) if renaming.path == path => div().flex_1().min_w_0().child(renaming.input.clone()).into_any_element(),
+            Some(renaming) if renaming.path == path => self.rename_box(div().flex_1().min_w_0().child(renaming.input.clone()), cx).into_any_element(),
             _ => {
                 let name = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone());
                 self.rename_on_slow_click(name, path, cx).into_any_element()

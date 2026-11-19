@@ -1,7 +1,7 @@
 //! 画面に共通の部品。アイコン、ボタンの枠、スイッチ、ラジオ、スライダーの見た目をここに集める。
 
 use crate::theme;
-use gpui::{AnyView, App, AssetSource, Context, Div, Render, Result, SharedString, Stateful, Svg, Window, div, prelude::*, px, rgb, rgba, svg};
+use gpui::{AnyView, App, AssetSource, Context, Div, MouseDownEvent, Render, Result, SharedString, Stateful, Svg, Window, div, prelude::*, px, rgb, rgba, svg};
 use std::borrow::Cow;
 
 macro_rules! icons {
@@ -195,4 +195,56 @@ pub fn slider_track(id: impl Into<gpui::ElementId>, width: f32, height: f32, rat
                 .border_color(rgb(theme::CONTROL_LINE))
                 .shadow_sm(),
         )
+}
+
+/// 押した所がこの要素の外なら `f` を呼ぶ。押した所の本来の動作（ボタン、選択など）より先に呼ぶ。
+pub fn on_press_outside<V: 'static>(element: Div, cx: &Context<V>, f: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static) -> Div {
+    element.on_mouse_down_out(cx.listener(move |this, _: &MouseDownEvent, window, cx| f(this, window, cx)))
+}
+
+#[cfg(test)]
+mod press_outside_tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext, point};
+
+    /// 上に編集欄、下にボタンを置いた画面。
+    #[derive(Default)]
+    struct Screen {
+        ended: usize,
+        clicked: usize,
+    }
+
+    impl Render for Screen {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let field = div().absolute().top_0().left_0().w(px(100.)).h(px(20.));
+            let field = on_press_outside(field, cx, |this: &mut Self, _, _| this.ended += 1);
+            let button = div()
+                .id("button")
+                .absolute()
+                .top(px(50.))
+                .left_0()
+                .w(px(100.))
+                .h(px(20.))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, _| this.clicked += 1));
+            div().size_full().child(field).child(button)
+        }
+    }
+
+    #[gpui::test]
+    fn press_outside_ends_and_the_press_still_works(cx: &mut TestAppContext) {
+        let (screen, cx) = cx.add_window_view(|_, _| Screen::default());
+        cx.simulate_click(point(px(10.), px(60.)), Modifiers::none());
+        screen.read_with(cx, |screen, _| assert_eq!((screen.ended, screen.clicked), (1, 1)));
+        // 余白でも終える
+        cx.simulate_click(point(px(300.), px(300.)), Modifiers::none());
+        screen.read_with(cx, |screen, _| assert_eq!(screen.ended, 2));
+    }
+
+    #[gpui::test]
+    fn press_inside_does_not_end(cx: &mut TestAppContext) {
+        let (screen, cx) = cx.add_window_view(|_, _| Screen::default());
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+        screen.read_with(cx, |screen, _| assert_eq!(screen.ended, 0));
+    }
 }

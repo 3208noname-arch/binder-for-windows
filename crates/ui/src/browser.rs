@@ -178,6 +178,8 @@ impl Browser {
                 this.activated_at = Some(Instant::now());
             } else {
                 this.slow_click.cancel();
+                // 別のウィンドウへ移ったら、Explorer と同じく編集中の名前を確定する
+                this.commit_rename(window, cx);
             }
             cx.notify();
         })
