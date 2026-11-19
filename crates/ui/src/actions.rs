@@ -3,6 +3,7 @@
 use crate::browser::Browser;
 use crate::icons_view::{GridRow, grid_item_rects, grid_metrics};
 use crate::list_tree::{Flattened, Row, group_range};
+use crate::slow_click::Press;
 use crate::parts::{Icon, icon};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
@@ -367,6 +368,7 @@ impl Browser {
             return;
         }
         let Some(press) = self.press.take() else { return };
+        self.slow_click.cancel();
         if let Some(column) = press.band_column {
             // 離した時の行のクリックで、選んだ範囲が消えないようにする
             self.suppress_click = true;
@@ -994,21 +996,42 @@ impl Browser {
         cx.notify();
     }
 
-    /// 名前の文字の上のダブルクリックで、名前の編集を始める。行のダブルクリック（開く）へは渡さない。
-    pub fn rename_on_double_click(&self, name: gpui::Div, path: &Path, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
-        let target = path.to_path_buf();
-        name.id(gpui::ElementId::Name(format!("name-{}", path.display()).into())).on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            let modifiers = event.modifiers();
-            if event.click_count() != 2 || modifiers.control || modifiers.shift || modifiers.alt {
-                return;
-            }
-            cx.stop_propagation();
-            if std::mem::take(&mut this.suppress_click) {
-                return;
-            }
-            this.tab.selection.select_only(target.clone());
-            this.begin_rename(target.clone(), window, cx);
-        }))
+    /// 選択済みの1項目の名前の文字を、もう1回クリックした時に名前の編集を始める（Explorer と同じ）。
+    /// ダブルクリックの判定時間だけ待ち、その間に2回目のクリックやドラッグ、選択の変化が来たらやめる。
+    /// ダブルクリックは行へ渡すので、名前の上でも開く。
+    pub fn rename_on_slow_click(&self, name: gpui::Div, path: &Path, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+        let (press_path, click_path) = (path.to_path_buf(), path.to_path_buf());
+        name.id(gpui::ElementId::Name(format!("name-{}", path.display()).into()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                    let modifiers = event.modifiers;
+                    let wait = filer_shell::double_click_time();
+                    this.slow_click.press(Press {
+                        path: &press_path,
+                        sole_selected: this.tab.selection.only() == Some(press_path.as_path()),
+                        click_count: event.click_count,
+                        modified: modifiers.control || modifiers.shift || modifiers.alt || modifiers.platform,
+                        from_inactive: !this.window_active || this.activated_at.is_some_and(|at| at.elapsed() < wait),
+                    });
+                }),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                // ドラッグの後のクリックは行の方で捨てるので、ここでは読むだけ
+                let Some(token) = this.slow_click.release(&click_path, event.click_count(), this.suppress_click) else { return };
+                let wait = filer_shell::double_click_time();
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        let sole = this.tab.selection.only().map(Path::to_path_buf);
+                        let ready = this.window_active && this.tab.renaming.is_none() && this.press.is_none();
+                        if let Some(path) = this.slow_click.fire(token, sole.as_deref()).filter(|_| ready) {
+                            this.begin_rename(path, window, cx);
+                        }
+                    });
+                })
+                .detach();
+            }))
     }
 
     fn end_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {

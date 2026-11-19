@@ -24,6 +24,12 @@ impl Selection {
     pub fn len(&self) -> usize {
         self.items.len()
     }
+    /// 1項目だけが選ばれている時の、その項目。
+    pub fn only(&self) -> Option<&Path> {
+        let mut items = self.items.iter();
+        let first = items.next()?;
+        items.next().is_none().then_some(first.as_path())
+    }
     pub fn paths(&self) -> Vec<PathBuf> {
         self.items.iter().cloned().collect()
     }
@@ -114,6 +120,19 @@ mod tests {
         let mut paths: Vec<_> = s.paths().iter().map(|p| p.display().to_string()).collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn only_is_the_single_selected_item() {
+        let mut s = Selection::default();
+        assert_eq!(s.only(), None);
+        s.select_only(PathBuf::from("a"));
+        assert_eq!(s.only(), Some(Path::new("a")));
+        s.toggle(PathBuf::from("b"));
+        assert_eq!(s.only(), None);
+        // 外した項目にカーソルが残っても、残った1項目を返す
+        s.toggle(PathBuf::from("b"));
+        assert_eq!(s.only(), Some(Path::new("a")));
     }
 
     #[test]

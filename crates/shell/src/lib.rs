@@ -22,7 +22,7 @@ pub use context_menu::{MenuChoice, drag_items, preload_items_menu, show_folder_m
 pub use default_filer::{DefaultFiler, clean_argument, default_filer_state, forward_to_explorer, can_open, Restored, restore_explorer, restored_backup, set_binder_default};
 pub use dialog_sync::{publish_folder as publish_dialog_folder, send_to_foreground_dialog, set_enabled as set_dialog_sync};
 pub use drag_wheel::{take_wheel, watch_wheel};
-pub use ime::{control_down, cursor_position, left_button_down, place_ime_caret, remove_ime_caret};
+pub use ime::{control_down, cursor_position, double_click_time, left_button_down, place_ime_caret, remove_ime_caret};
 pub use watch::{WatchJob, watch_folder};
 
 pub use enumerate::{FolderSize, ListEvent, ListJob, folder_size, long_path, should_flush, start_list, start_search};

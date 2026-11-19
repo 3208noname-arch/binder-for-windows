@@ -11,6 +11,7 @@ use crate::list_tree::Flattened;
 use crate::media_view::{HoverSlot, MediaSurface};
 use crate::quick_look::QuickLook;
 use crate::size_cache::SizeCache;
+use crate::slow_click::SlowClick;
 use crate::tabs::Tab;
 use crate::theme;
 use filer_core::{
@@ -145,6 +146,10 @@ pub struct Browser {
     sort_anchor: MenuAnchor,
     group_anchor: MenuAnchor,
     pub window_active: bool,
+    /// 最後にウィンドウが前に出た時刻。そのクリックで名前の変更を始めないために使う
+    pub activated_at: Option<Instant>,
+    /// 選択済みの名前をもう1回クリックした時の、名前の変更の待ち
+    pub slow_click: SlowClick,
     pub icons: Entity<IconCache>,
     pub sizes: Entity<SizeCache>,
     pub favorites: Vec<Favorite>,
@@ -168,7 +173,15 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe_window_activation(window, |_, _, cx| cx.notify()).detach();
+        cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            if window.is_window_active() {
+                this.activated_at = Some(Instant::now());
+            } else {
+                this.slow_click.cancel();
+            }
+            cx.notify();
+        })
+        .detach();
         let focus = cx.focus_handle();
         window.focus(&focus);
         let settings = store.as_ref().map(Store::app_settings).unwrap_or_default();
@@ -260,6 +273,8 @@ impl Browser {
             sort_anchor: Rc::default(),
             group_anchor: Rc::default(),
             window_active: true,
+            activated_at: None,
+            slow_click: SlowClick::default(),
             icons,
             sizes,
             favorites,
@@ -1130,6 +1145,8 @@ impl Render for Browser {
                 let target = this.current_folder(cx);
                 this.drop_paths(paths.paths(), target, filer_shell::control_down(), cx);
             }))
+            // 押したらまず名前の変更の待ちを取り消す。名前の上なら、その後で決め直す
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.slow_click.cancel()))
             .on_mouse_move(cx.listener(Self::drag))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_drag(cx)))

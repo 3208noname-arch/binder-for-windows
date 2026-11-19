@@ -21,6 +21,7 @@ mod scrollbar;
 mod search;
 mod settings_view;
 mod size_cache;
+mod slow_click;
 mod tabs;
 mod text_input;
 mod theme;

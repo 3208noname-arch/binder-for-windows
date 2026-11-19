@@ -251,7 +251,7 @@ impl Browser {
             Some(renaming) if renaming.path == path => div().flex_1().min_w_0().child(renaming.input.clone()).into_any_element(),
             _ => {
                 let name = div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone());
-                self.rename_on_double_click(name, path, cx).into_any_element()
+                self.rename_on_slow_click(name, path, cx).into_any_element()
             }
         }
     }

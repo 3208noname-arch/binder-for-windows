@@ -205,7 +205,7 @@ impl Browser {
             let fade = linear_gradient(180., linear_color_stop(gpui::Rgba { a: 0., ..color }, 0.), linear_color_stop(color, 1.));
             label.child(text).when(overflowing, |label| label.child(div().absolute().left_0().right_0().bottom_0().h(px(line)).bg(fade)))
         };
-        let label = self.rename_on_double_click(label, path, cx);
+        let label = self.rename_on_slow_click(label, path, cx);
         div()
             .flex()
             .flex_col()

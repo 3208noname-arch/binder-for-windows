@@ -5,7 +5,7 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCandidateWindow, ImmSetCompositionWindow,
 };
 use windows::Win32::Graphics::Gdi::ScreenToClient;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetDoubleClickTime, VK_CONTROL, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{CreateCaret, DestroyCaret, GetCursorPos, SetCaretPos};
 
 /// IMEのモード表示と変換候補が文字カーソルの真下に出るよう、見えないキャレットと位置を渡す。
@@ -45,6 +45,11 @@ pub fn cursor_position(hwnd: isize) -> Option<(i32, i32)> {
 pub fn control_down() -> bool {
     let state = unsafe { GetAsyncKeyState(i32::from(VK_CONTROL.0)) };
     state < 0
+}
+
+/// ダブルクリックと見なす2回のクリックの間の長さ。Windows の設定に従う。
+pub fn double_click_time() -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(unsafe { GetDoubleClickTime() }))
 }
 
 /// 左ボタンが押されているか。ウィンドウの外で離しても分かる。
