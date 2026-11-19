@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "filer-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rayon",
  "serde",
@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "filer-shell"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "filer-core",
  "png 0.17.16",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "filer-store"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "filer-core",
  "rusqlite",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "filer-ui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "embed-resource",
  "filer-core",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "icongen"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "image",
  "resvg",
